@@ -26,34 +26,36 @@ Use one monorepo. Suggested layout:
 
 ```
 idr-system/
-  data/
+  data/                                              [Layer 1 - Data & Models]
     raw/                  (IO-VNBD downloads, untouched)
     processed/            (windowed, normalized tensors, per model)
     scripts/               (download + preprocessing scripts)
-  models/
+  models/                                            [Layer 1 - Data & Models]
     alignment_net/
     channel_a_velocity/
     channel_b_velocity/
     road_signature/
     calibration_adapter/
     common/                (shared dataset classes, normalization utils)
-  fusion_core/
+  fusion_core/                                       [Layer 2 - Fusion & Map]
     python_prototype/      (UKF prototype, filterpy or custom)
     cpp/                    (production C++ port, Eigen based)
-  map_matching/
+  map_matching/                                      [Layer 2 - Fusion & Map]
     osm_extraction/
     hmm/
-  android_app/
+  android_app/                                       [Layer 3 - Platform & Edge]
     app/                    (Kotlin, Jetpack Compose)
     native/                 (NDK/C++ bridge to fusion_core/cpp)
-  edge_engine/
+  edge_engine/                                       [Layer 3 - Platform & Edge]
     src/                    (C++ main loop, sensor drivers)
   tools/
-    benchmark_replay/       (offline trajectory replay + drift plots)
-    export/                 (ONNX -> TFLite conversion scripts)
+    benchmark_replay/       (offline trajectory replay + drift plots)     [Layer 2]
+    export/                 (ONNX -> TFLite conversion scripts)          [Layer 1]
   docs/
     this file, plus per-module READMEs
 ```
+
+Ownership is a starting point, not a wall. Layer 2 will read `models/common/` to know the exact tensor shapes it receives, and Layer 3 will read `fusion_core/cpp/` headers to know what it's linking against. Nobody works in a silo, the folder boundaries just say who is responsible for keeping that folder green.
 
 Every model folder must contain: `train.py`, `model.py`, `dataset.py`, `export.py`, `config.yaml`, and a `README.md` with input/output shapes and current best metric. This is not optional, it is how other team members and other Claude sessions will know what state a module is in without reading all the code.
 
@@ -71,7 +73,9 @@ Every model folder must contain: `train.py`, `model.py`, `dataset.py`, `export.p
 
 ---
 
-## 3. Data Pipeline (Phase 0)
+## 3. Data Pipeline (Phase 0) [Layer 1 - Data & Models]
+
+If you are joining Layer 1 partway through: this section and Section 4 are the whole job. You do not need to read Section 5 onward to be useful here, though it helps to know that Sections 5 and 7 downstream are waiting on the exact tensor shapes and `norm_stats.json` files this section produces, so changing an interface here after Layer 2/3 have started consuming it is expensive. Check `data/processed/README.md` (produced by 3.2 step 4) before assuming the current state, it will tell you exactly what has been run and with what stats.
 
 ### 3.1 Dataset
 
@@ -103,11 +107,11 @@ Secondary (collected by the team before the finale): short GNSS-available loops 
 
 ---
 
-## 4. Model Specifications (Phase 1)
+## 4. Model Specifications (Phase 1) [Layer 1 - Data & Models]
 
-Every model below is small on purpose. On-device latency budget is tight (see Section 9), so do not scale these up without re-checking the latency budget.
+Every model below is small on purpose. On-device latency budget is tight (see Section 9), so do not scale these up without re-checking the latency budget. Each subsection below is independently buildable once Section 3's processed tensors exist, so within Layer 1 the two people here can split by subsection (e.g. one owns 4.1/4.2, the other owns 4.3/4.4, then both converge on 4.5/4.6) rather than working sequentially.
 
-### 4.1 Alignment / Mount Calibration Net
+### 4.1 Alignment / Mount Calibration Net (Layer 1)
 
 - Purpose: estimate the phone's pitch, roll, yaw relative to the vehicle's direction of travel.
 - Input: 2 second window, 9 channels (accel x/y/z, gyro x/y/z, mag x/y/z), shape (200, 9).
@@ -119,7 +123,7 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 - Epochs: 60, early stopping on val loss with patience 10.
 - Target: mean angular error under 3 degrees on held-out routes.
 
-### 4.2 Channel A - NHC-constrained bias-correction network
+### 4.2 Channel A - NHC-constrained bias-correction network (Layer 1)
 
 - Purpose: correct accelerometer/gyro bias and scale error so that integrated velocity stays close to true velocity.
 - Input: 2 second window, 6 channels (accel x/y/z, gyro x/y/z), shape (200, 6).
@@ -134,7 +138,7 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 - Target: velocity RMSE under 0.5 m/s on held-out routes (synchronized split).
 - Note: NHC (no lateral slip, no vertical velocity) is enforced downstream in the UKF process model, not inside this network. Keep this network a pure regressor.
 
-### 4.3 Channel B - accelerometer-only velocity net (CarSpeedNet-style)
+### 4.3 Channel B - accelerometer-only velocity net (CarSpeedNet-style) (Layer 1)
 
 - Purpose: independent, gyro-free forward speed estimate, used as a cross-check against Channel A.
 - Input: 4 second window, 3 channels (accel x/y/z only), shape (400, 3).
@@ -146,7 +150,7 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 - Epochs: 90, early stopping patience 12.
 - Target: velocity RMSE around 1.5 to 2.0 m/s (this channel is deliberately less accurate than Channel A, its job is disagreement detection, not primary accuracy).
 
-### 4.4 Road-Signature Segment Classifier
+### 4.4 Road-Signature Segment Classifier (Layer 1)
 
 - Purpose: classify which pre-mapped road segment the vehicle is currently on, from vibration signature alone, to use as a periodic drift-reset anchor.
 - Input: 2 second window, 6 channels (accel + gyro), shape (200, 6).
@@ -157,10 +161,10 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 - Optimizer: Adam, lr 1e-3.
 - Batch size: 64.
 - Epochs: 80, early stopping patience 10.
-- Target: top-1 segment accuracy above 90 percent on held-out passes of the same corridor.
+- Target: top-1 segment accuracy above 90 percent on held-out passes of the same corridor. Accuracy alone is not sufficient here since segments are imbalanced by corridor length (a long straight segment gets far more windows than a short one) - report macro-averaged recall and macro-averaged F1 alongside accuracy for every evaluation run, and treat a class with recall well below the macro average as a real problem even if overall accuracy looks fine.
 - Deployment rule: only trigger a drift-reset when softmax max probability exceeds 0.85, to avoid false resets from a low-confidence guess.
 
-### 4.5 Per-Vehicle Calibration Adapter
+### 4.5 Per-Vehicle Calibration Adapter (Layer 1)
 
 - Purpose: fast on-device recalibration of Channel A and Channel B for a specific vehicle and mount, using a short GNSS-available calibration drive (10 to 30 seconds).
 - Method: LoRA-style low-rank adapters inserted into the final FC layers of Channel A and Channel B. Rank 4 to 8. Trainable parameter count must stay under 50k total across both models combined.
@@ -169,7 +173,7 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 - Label source: GNSS-derived velocity during the calibration drive.
 - Output: a small adapter weight file (a few KB) saved per vehicle profile, loaded alongside the base models at inference time.
 
-### 4.6 Export and Quantization (applies to all 5 models above)
+### 4.6 Export and Quantization (applies to all 5 models above) (Layer 1)
 
 1. Export each trained PyTorch model to ONNX, opset 17, with fixed input shape (batch=1) for mobile.
 2. Run ONNX Runtime's post-training dynamic quantization (int8) on each exported model.
@@ -177,9 +181,19 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 4. Save quantized models under a fixed naming scheme: `alignment_net.onnx`, `channel_a.onnx`, `channel_b.onnx`, `road_signature_<region>.onnx`.
 5. Combined footprint target: under 8 MB for the four core models (excluding per-region road-signature packs, which are downloaded separately).
 
+### 4.7 Evaluation Metrics Standard (applies to every classification-style output in this system)
+
+Accuracy alone is judged insufficient for anything the judges will scrutinize or that feeds a safety-relevant decision downstream (the road-signature classifier's output directly triggers a position reset in Section 5.3). For every classifier - currently the road-signature classifier (4.4), and the GNSS quality classifier if it is ever upgraded from rule-based to learned (5.5.4) - report all of the following on every evaluation run, not accuracy in isolation:
+
+- Accuracy (overall correct / total)
+- Macro-averaged recall (catches a class the model is quietly ignoring even while overall accuracy stays high)
+- Macro-averaged F1 (the single number to track run over run for regressions)
+
+Regression models (Channel A, Channel B, alignment net, calibration adapter) keep their existing RMSE/MAE/angular-error targets, those are the correct metric family for continuous outputs, recall and F1 do not apply there.
+
 ---
 
-## 5. Fusion Core - Unscented Kalman Filter (Phase 2)
+## 5. Fusion Core - Unscented Kalman Filter (Phase 2) [Layer 2 - Fusion & Map]
 
 ### 5.1 State vector
 
@@ -210,6 +224,8 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 ### 5.5 Implementation plan
 
+Do not wait on Layer 1's trained models to start this section. The filter's process model, sigma-point math, and 4-source update logic can be built and unit-tested (Section 11.2) against synthetic sensor data and ground-truth-derived velocity with injected noise standing in for Channel A/B, entirely independent of whether the real models exist yet. Layer 1's real model outputs are only needed for the final validation step below (checking real drift numbers against IO-VNBD), which is a later checkpoint, not the starting point.
+
 1. Prototype in Python first, using `filterpy`'s UnscentedKalmanFilter class or a custom implementation if filterpy's API does not fit the 4-source update cleanly. Validate against the IO-VNBD held-out routes using the benchmark replay tool (Section 8).
 2. Once the filter logic and tuning (Q, R matrices, thresholds) are locked, port to C++ using Eigen. This becomes a shared library (`fusion_core`) linked by both the Android native bridge and the edge engine.
 3. Sigma point parameters: alpha = 1e-3, beta = 2, kappa = 0 (standard starting values, tune alpha if the filter is numerically unstable).
@@ -218,7 +234,7 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 ---
 
-## 6. Map Matching (Phase 3)
+## 6. Map Matching (Phase 3) [Layer 2 - Fusion & Map]
 
 1. Extract OSM data for target corridors using osmium-tool or osmnx, at build time (not at runtime), and store as a local routing graph (nodes = intersections/shape points, edges = road segments with associated geometry).
 2. Implement an HMM over candidate road edges: emission probability based on perpendicular distance from the fused position to each candidate edge (Gaussian, sigma tuned to GNSS/fusion uncertainty), transition probability based on routing-graph connectivity and distance between candidate edges across consecutive timesteps.
@@ -227,7 +243,7 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 ---
 
-## 7. Android App (Phase 4)
+## 7. Android App (Phase 4) [Layer 3 - Platform & Edge]
 
 ### 7.1 Sensor ingest
 
@@ -266,7 +282,7 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 ---
 
-## 8. Edge Engine (Phase 5)
+## 8. Edge Engine (Phase 5) [Layer 3 - Platform & Edge]
 
 - Same `fusion_core` C++ library, same ONNX models, different sensor ingest and I/O layer.
 - Sensor ingest: UART or SPI driver reading a FOG-grade IMU at roughly 200 Hz, normalized into the same windowed-tensor format used by the phone app before touching any model (this shared normalization step is what keeps the two deliverables one codebase).
@@ -275,7 +291,9 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 ---
 
-## 9. Benchmark Replay Tool (build this early, use it constantly)
+## 9. Benchmark Replay Tool (build this early, use it constantly) [Layer 2 - Fusion & Map]
+
+Build this in parallel with Layer 1's model training, not after it, using random/dummy values in place of Channel A/B/road-signature outputs until real ones exist. Swap in real model outputs as Layer 1 delivers them, checkpoint by checkpoint.
 
 Build a small offline tool (Python) that:
 
@@ -299,50 +317,60 @@ This tool is the single most important thing to have working early, since every 
 
 ## 11. Testing Plan
 
-1. Unit tests per model: input/output shape checks, a fixed-seed forward pass with known expected output range (catch silent breakage from refactors).
-2. Fusion core unit tests: feed synthetic sensor data with known ground truth (straight line, constant turn) and check the UKF converges to the expected state.
-3. Integration test: run the benchmark replay tool (Section 9) after every significant change to any model or to the fusion core, track drift percentage over time in a simple log so regressions are caught immediately.
-4. On-device test: measure actual latency and battery draw on at least two real Android devices of different price tiers, not just an emulator.
-5. Field test: at least one real GNSS-blackout test (an actual tunnel or underground parking lot) before the finale, on at least two different vehicle types.
+1. Unit tests per model: input/output shape checks, a fixed-seed forward pass with known expected output range (catch silent breakage from refactors). [Layer 1] For the road-signature classifier specifically, the fixed-seed check should assert on macro recall/F1 too, not just that the output shape is right (see Section 4.7).
+2. Fusion core unit tests: feed synthetic sensor data with known ground truth (straight line, constant turn) and check the UKF converges to the expected state. [Layer 2]
+3. Integration test: run the benchmark replay tool (Section 9) after every significant change to any model or to the fusion core, track drift percentage over time in a simple log so regressions are caught immediately. [Layer 2]
+4. On-device test: measure actual latency and battery draw on at least two real Android devices of different price tiers, not just an emulator. [Layer 3]
+5. Field test: at least one real GNSS-blackout test (an actual tunnel or underground parking lot) before the finale, on at least two different vehicle types. [Layer 3, with Layer 1 support for logging/labeling the resulting run]
 
 ---
 
-## 12. Task Breakdown (assign one to each team member / Claude session)
+## 12. Task Breakdown (three layers, two people each)
 
-Each task below is meant to be handed off independently. Every task references the section above with its full spec, read that section before starting.
+We are not staffing this the way the section headers above imply (one person per phase). Six people, three layers, two people per layer. Each layer below is written as a full brief, specific enough that whoever actually sits down to write the code for a given task, whether that's the two people assigned to the layer working side by side, one of them working solo on their half, or one of them pairing with an AI coding session to move faster through the mechanical parts, can read it and start without needing a live explanation first. Read the full section referenced, not just the one-line deliverable here, the contracts and specs live in the earlier sections.
 
-1. **Data pipeline engineer** - Build Section 3 end to end: download IO-VNBD, write the resampling/windowing/normalization/splitting scripts, produce the processed tensors every model training script will consume. Deliverable: a `data/processed/` folder plus a `README.md` documenting exact preprocessing steps and split composition.
+### Layer 1 - Data & Models (2 people)
 
-2. **ML engineer - alignment and Channel A** - Build and train Section 4.1 and 4.2. Deliverable: trained weights, exported quantized ONNX files, a metrics report against the targets stated in those sections.
+Covers Section 3, Section 4 (all six subsections), and the model-level half of Section 11.1. This is the heaviest layer by raw scope (it collapses what would otherwise be four separate roles - data engineer plus three ML engineers - into two people), but every task inside it is a self-contained, well-specified training job against a fixed input/output contract, which makes it the layer easiest to drop into partway through if someone else's time frees up later.
 
-3. **ML engineer - Channel B and road signature** - Build and train Section 4.3 and 4.4. Deliverable: same as above, plus at least one trained road-signature pack for a real corridor the team has collected data on.
+- **Person A**: Build Section 3 end to end first (download IO-VNBD, resampling/windowing/normalization/splitting scripts, produce the tensors everything downstream consumes). Once `data/processed/` exists, move to Section 4.1 (alignment net) and 4.2 (Channel A) - these are the two models everything else is easiest to sanity-check against, since Channel A's target (velocity RMSE under 0.5 m/s) is the most directly comparable to raw GNSS ground truth.
+- **Person B**: Once Section 3's tensors exist, build Section 4.3 (Channel B) and 4.4 (road-signature classifier). The road-signature classifier needs real collected corridor data (Section 3.1's "secondary" dataset), so coordinate collection-drive timing with whoever is doing the field/vehicle sessions rather than blocking on it silently.
+- **Both, once 4.1-4.4 have first working versions**: Section 4.5 (calibration adapter, lowest priority of the five, has a documented fallback in Section 14 if it runs out of time) and Section 4.6 (export/quantization, applies to all five models, worth doing together once there is more than one model ready so the pipeline is proven once, not five times).
+- Priority order if time runs short: Alignment + Channel A first, Channel B second, road-signature third, calibration adapter last.
+- Deliverables: `data/processed/` plus preprocessing README; trained weights and quantized ONNX exports for all five models; a metrics report per model against the targets in Section 4 (for the road-signature classifier, that means accuracy, macro recall, and macro F1 per Section 4.7, not accuracy alone); at least one road-signature pack trained on real collected data; a before/after calibration accuracy demo.
 
-4. **ML engineer - calibration adapter** - Build Section 4.5, including the on-device fine-tuning harness (must run under real mobile compute constraints, test this on-device early, not just in a desktop simulation). Deliverable: working adapter training code plus a demo showing before/after calibration accuracy on a held-out vehicle.
+### Layer 2 - Fusion & Map (2 people, C++ heavy)
 
-5. **Fusion engineer** - Build Section 5, Python prototype first, then the C++ port. Deliverable: `fusion_core` library (Python and C++ versions) plus unit tests from Section 11.2.
+Covers Section 5, Section 6, Section 9, and the fusion/integration half of Section 11. This is the layer that actually does the C++ work (Eigen-based UKF port, the shared `fusion_core` library both other layers link against), and the one layer that does not need to wait on Layer 1 to start real work, see the note at the top of Section 5.5.
 
-6. **Map engineer** - Build Section 6. Deliverable: `map_matching` module, tested against at least one real corridor's OSM extract.
+- **Person A**: Section 5 - Python prototype of the UKF first (synthetic data, does not need trained models yet), then the Eigen C++ port once the filter logic and tuning are locked. `fusion_core`'s interface is a contract Layer 3 links against directly, do not change its shape without telling them.
+- **Person B**: Section 9 - benchmark replay tool, start immediately in parallel with Person A's prototype work using dummy/random values in place of model outputs, swap in real ones as Layer 1 delivers them. Then Section 6 - HMM map matching, once an OSM extract for at least one real corridor is available.
+- **Both, once the C++ port is real**: Section 11.2 (fusion unit tests against synthetic ground truth) and 11.3 (integration test via the benchmark tool after every significant change).
+- Deliverables: `fusion_core` (Python and C++), `map_matching` tested against a real corridor's OSM extract, benchmark tool showing real drift numbers against IO-VNBD held-out routes, fusion unit tests passing.
 
-7. **Android engineer - sensor and native pipeline** - Build Section 7.1, 7.2 (sensor/native parts), and the JNI bridge to `fusion_core`. Deliverable: a working background service that logs raw sensor data and can call into the native fusion core.
+### Layer 3 - Platform & Edge (2 people)
 
-8. **Android engineer - UI and integration** - Build Section 7.2 (UI parts), 7.3, 7.4. Deliverable: the full app runtime loop wired together, plus the calibration-drive user flow.
+Covers Section 7, Section 8, and the on-device/field half of Section 11. Both people here also touch C++ (the NDK bridge, the edge engine), but the focus is integration and platform work rather than the core filter math Layer 2 owns.
 
-9. **Edge engine developer** - Build Section 8. Deliverable: working edge-engine binary on the reference hardware, reading a real (or simulated) external IMU and streaming fused position output.
-
-10. **Tools/QA engineer** - Build Section 9 (benchmark replay tool) FIRST, before most other tasks finish, since everyone else needs it. Then own Section 11 end to end.
+- **Person A**: Section 7.1 (raw sensor ingest, native ring buffer so the JVM GC never touches the hot path, FIR pre-filter) and the JNI bridge to `fusion_core`. Once that bridge works, move to Section 8 (edge engine) - it links the same `fusion_core` library with a different sensor ingest/I-O layer, so the skills transfer directly.
+- **Person B**: Section 7.2 (UI, Jetpack Compose), 7.3 (runtime loop wiring all the pieces together), 7.4 (calibration-drive user flow).
+- **Both**: Section 11.4 (on-device latency/battery test on at least two real devices of different price tiers) and 11.5 (field GNSS-blackout test), with Layer 1 support afterward for logging/labeling whatever raw data comes out of that field run.
+- Deliverables: Android app runtime loop working end to end on a real device (rough UI is fine at first), edge-engine binary streaming fused position on reference hardware.
 
 ---
 
-## 13. Milestones
+## 13. Checkpoints
 
-- Week 1: data pipeline done, benchmark replay tool done (skeleton, can run with dummy/random model outputs), fusion core Python prototype done with synthetic-data unit tests passing.
-- Week 2: all 5 models trained to at least a first working version (not final accuracy), ONNX export/quantization pipeline working end to end for at least one model as a proof of the export path.
-- Week 3: fusion core C++ port done, map matching done, benchmark replay tool showing real drift numbers against IO-VNBD held-out routes.
-- Week 4: Android app runtime loop working end to end on a real device (even if UI is rough), edge engine bring-up on reference hardware.
-- Week 5: calibration adapter working on-device, at least one real vehicle collection session done, road-signature pack trained on real collected data.
-- Week 6: integration testing, at least one real field blackout test, polish UI, prepare the screening/demo materials.
+Checkpoints, not weeks. The ORDER below should not change (later checkpoints genuinely depend on earlier ones being real and tested, not just planned), but how long each one takes is whatever it takes, don't force a calendar onto it.
 
-Adjust week counts to your actual timeline, the ORDER of these milestones should not change, since later phases depend on earlier ones being real and tested, not just planned.
+- **Checkpoint 0 (kickoff, all three layers start the same day)**: Layer 1 downloading IO-VNBD and starting preprocessing scripts. Layer 2 building the UKF process model and its synthetic-data unit tests (this does not need Layer 1's models, see Section 5.5), plus the benchmark tool skeleton running on dummy outputs. Layer 3 scaffolding the Android project and edge-engine project, and getting real raw IMU data flowing into a ring buffer even before there is a model to feed it into.
+- **Checkpoint 1**: Layer 1's processed tensors and `norm_stats.json` exist and are documented. Layer 2's Python UKF prototype passes its synthetic-data unit tests. Layer 3's sensor ingest is logging real raw IMU data on a real device.
+- **Checkpoint 2**: Layer 1 has Alignment + Channel A trained to a first working version, with the ONNX export/quantization path proven end to end for at least that one model. Layer 2 swaps a first real model output into the benchmark tool in place of a dummy value. Layer 3's JNI bridge successfully calls into `fusion_core`.
+- **Checkpoint 3**: Layer 1 has all five models at a first working version (not final accuracy). Layer 2's C++ port of the fusion core is underway.
+- **Checkpoint 4**: Layer 2's C++ port is done, map matching is done, the benchmark tool is showing real drift numbers on IO-VNBD held-out routes.
+- **Checkpoint 5**: Layer 3's Android runtime loop works end to end on a real device (UI can still be rough). Edge engine bring-up on reference hardware.
+- **Checkpoint 6**: Layer 1's calibration adapter works on-device, at least one real vehicle collection session is done, and a road-signature pack is trained on real collected data with accuracy/recall/F1 reported per Section 4.7.
+- **Checkpoint 7 (finale prep)**: integration testing across all three layers, at least one real field blackout test, UI polish, screening/demo materials ready.
 
 ---
 
