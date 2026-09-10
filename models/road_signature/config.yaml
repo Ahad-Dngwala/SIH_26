@@ -1,0 +1,27 @@
+# MIP Section 4.4
+model:
+  input_channels: 6           # accel + gyro
+  window_length: 200          # 2s @ 100Hz
+  conv_channels: [32, 64, 128]
+  kernel_size: 5
+  n_segments: null             # TBD per corridor/region - roughly 1 per 50-100m of mapped route, see README
+
+loss:
+  name: cross_entropy
+  label_smoothing: 0.1
+
+optimizer:
+  name: adam
+  lr: 1.0e-3
+
+train:
+  batch_size: 64
+  epochs: 80
+  early_stopping_patience: 10
+
+target:
+  top1_accuracy_threshold: 0.90   # on held-out passes of the same corridor
+  report_macro_recall_and_f1: true  # Section 4.7 - accuracy alone is not sufficient
+
+deployment:
+  confidence_threshold_for_drift_reset: 0.85   # Section 5.3 - consumed by the fusion core, not this model

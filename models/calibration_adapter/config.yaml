@@ -1,0 +1,17 @@
+# MIP Section 4.5
+adapter:
+  rank: 6                       # range given: 4-8
+  max_trainable_params: 50000    # combined budget across both channels - see model.py assertion
+
+optimizer:
+  name: sgd                      # not Adam - keeps optimizer state small (Section 4.5)
+  lr: 1.0e-4
+
+train:
+  epochs: 8                      # range given: 5-10
+  batch_size: 12                  # range given: 8-16, limited by calibration session length
+
+calibration_drive:
+  duration_seconds: [10, 30]
+
+label_source: gnss_derived_velocity

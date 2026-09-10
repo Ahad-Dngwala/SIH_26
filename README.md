@@ -17,8 +17,18 @@ Six people, three layers, two people per layer, working off checkpoints rather t
 
 ## Repo layout
 
-See Section 1 of the Master Implementation Plan for the full directory tree with per-folder layer ownership.
+See Section 1 of the Master Implementation Plan for the full directory tree with per-folder layer ownership. Every folder that needs one has its own `README.md`; start at [`docs/INDEX.md`](docs/INDEX.md) to browse all of them from one place.
+
+## Getting started
+
+```
+docker compose build
+docker compose run --rm ml bash        # Layer 1, and the Python side of Layer 2
+docker compose run --rm cpp-dev bash   # Layer 2's C++ port, Layer 3's edge engine
+```
+
+Both services bind-mount the repo root, so edits on the host are picked up immediately, no rebuild needed unless `requirements.txt` changes. Android (`android_app/`) is not containerized - use Android Studio locally, see `android_app/README.md`.
 
 ## Status
 
-Early build phase. Check `Master_Implementation_Plan.md` Section 13 for the current checkpoint.
+Repository scaffold and Docker dev environment committed - Layer 1 can start on Section 3. Check `Master_Implementation_Plan.md` Section 13 for the current checkpoint.

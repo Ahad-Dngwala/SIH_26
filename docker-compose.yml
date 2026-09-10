@@ -1,0 +1,32 @@
+# Dev environments, not production images: both services bind-mount the
+# repo root to /workspace so edits on the host are picked up immediately.
+#
+# Usage:
+#   docker compose build                       # one-time (and after requirements.txt changes)
+#   docker compose run --rm ml bash             # Layer 1 / Python side of Layer 2
+#   docker compose run --rm ml python models/channel_a_velocity/train.py
+#   docker compose run --rm cpp-dev bash        # Layer 2 C++ port / Layer 3 edge engine
+#
+# Android (android_app/) is intentionally not containerized here - use
+# Android Studio locally, see android_app/README.md.
+
+services:
+  ml:
+    build:
+      context: .
+      dockerfile: docker/ml.Dockerfile
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+
+  cpp-dev:
+    build:
+      context: .
+      dockerfile: docker/cpp.Dockerfile
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true

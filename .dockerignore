@@ -1,0 +1,16 @@
+.git/
+data/raw/
+data/processed/
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+build/
+android_app/**/.gradle/
+android_app/**/build/
+*.onnx
+*.tflite
+*.pt
+*.pth
+wandb/
+HLD/*.pdf
