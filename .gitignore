@@ -18,6 +18,9 @@ data/processed/*
 # ---- Trained model artifacts / experiment tracking ----
 *.onnx
 *.tflite
+
+# ---- Benchmark replay tool run output (Section 9 / 11.3) ----
+tools/benchmark_replay/output/
 *.pt
 *.pth
 *.ckpt
