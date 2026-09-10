@@ -1,0 +1,50 @@
+# tools/benchmark_replay/config.yaml
+#
+# MIP Section 9 / docs/HANDOFF_benchmark_replay_tool.md.
+#
+# `data/processed/` is empty as of this config (Layer 1 hasn't run
+# Section 3 yet - see data/README.md), so `route.source: synthetic`
+# is the only usable option right now. Switch to `io_vnbd` the moment
+# a real processed route exists; route_loader.py raises a clear error
+# if you flip this before that's true.
+
+route:
+  source: synthetic          # synthetic | io_vnbd
+  synthetic:
+    kind: constant_turn      # straight | constant_turn
+    duration_s: 120
+    dt_s: 0.1                # 10 Hz, matches Section 7.3's target output rate
+    speed_mps: 16.7           # ~60 km/h, matches the HLD's "1km at 60km/h" benchmark example
+    turn_rate_dps: 3.0        # only used when kind: constant_turn
+    accel_noise_std: 0.05     # m/s^2, additive noise on synthetic accelerometer
+    gyro_noise_std: 0.01      # rad/s, additive noise on synthetic gyro
+    accel_bias: 0.03          # m/s^2, constant bias - this is what makes raw double-integration blow up
+    seed: 0
+  io_vnbd:
+    processed_path: null      # e.g. data/processed/benchmark_replay/route_001.npz - fill in once Layer 1 delivers
+
+# Blackout window per MIP Section 9 step 2: GNSS is masked only inside
+# this window, still feeds the fusion core normally outside it.
+blackout:
+  start_s: 40
+  end_s: 100
+
+# Section 2 of the handoff doc: five swappable components, each
+# independently dummy or real right now. All dummy is the
+# Checkpoint 0 bar. Flip one at a time as Layer 1 / Layer 2 Person A
+# deliver real implementations - see docs/HANDOFF_benchmark_replay_tool.md
+# section 9 ("Definition of done, by checkpoint").
+components:
+  channel_a: dummy          # dummy | real
+  channel_b: dummy          # dummy | real
+  road_signature: dummy     # dummy | real
+  fusion: dummy             # dummy | real  (real = fusion_core/python_prototype, empty as of this config)
+  map_matching: dummy       # dummy | real  (dummy = identity passthrough, per handoff section 2)
+
+# Section 4 of the handoff doc - road-signature confidence threshold,
+# matches MIP Section 5.3.
+road_signature_confidence_threshold: 0.85
+
+output:
+  plot_path: tools/benchmark_replay/output/latest_run.png
+  regression_log_path: tools/benchmark_replay/output/regression_log.csv

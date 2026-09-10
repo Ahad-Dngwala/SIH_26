@@ -23,5 +23,26 @@ this after every significant change to any model or to the fusion
 core, and track drift percentage over time in a simple log so
 regressions are caught immediately.
 
-Status: not yet built - this is the second half of the current
-scaffolding pass, see the handoff doc.
+Status: **Checkpoint 0 bar met.** Skeleton runs end to end on a
+synthetic route (`config.yaml`, `route: synthetic`) with all five
+pipeline components (`components.py`) dummy: Channel A/B are
+noised-ground-truth, road-signature never triggers, fusion is a bare
+constant-velocity integrator (not a real UKF), map-matching is
+identity. Produces a three-trajectory plot (`plot.py`) and a drift
+percentage (`drift.py`) against the raw double-integration baseline
+(`pipeline.py`), and appends both to a regression log (`regression_log.py`)
+per Section 11.3. Run it with:
+
+```
+docker compose run --rm ml python tools/benchmark_replay/run.py
+```
+
+Not yet done: real IO-VNBD route loading (`route_loader.load_io_vnbd_route`
+raises `NotImplementedError` - `data/processed/` is still empty), and
+all five components are still dummy - swap them to `real` in
+`config.yaml` one at a time as Layer 1 / Layer 2 Person A deliver
+actual implementations (Checkpoints 2 and 4, see
+`docs/HANDOFF_benchmark_replay_tool.md` section 9). The drift formula
+in `drift.py` is also the handoff doc's "most literal reading" of the
+ISRO benchmark, not yet confirmed against PS 26168 itself - see that
+doc's section 4.

@@ -115,8 +115,8 @@ Every model below is small on purpose. On-device latency budget is tight (see Se
 
 - Purpose: estimate the phone's pitch, roll, yaw relative to the vehicle's direction of travel.
 - Input: 2 second window, 9 channels (accel x/y/z, gyro x/y/z, mag x/y/z), shape (200, 9).
-- Architecture: Conv1d(9 to 32, kernel 5, stride 1) - ReLU - Conv1d(32 to 64, kernel 5, stride 2) - ReLU - Conv1d(64 to 64, kernel 3, stride 2) - ReLU - GlobalAveragePool - FC(64 to 32) - ReLU - FC(32 to 3).
-- Output: 3 values, pitch/roll/yaw offset in radians.
+- Architecture: Conv1d(9 to 32, kernel 5, stride 1) - ReLU - Conv1d(32 to 64, kernel 5, stride 2) - ReLU - Conv1d(64 to 64, kernel 3, stride 2) - ReLU - GlobalAveragePool - FC(64 to 32) - ReLU - FC(32 to 4).
+- Output: 4 values (pitch, roll, sin(yaw), cos(yaw) - see the loss line below), reconstruct yaw offset via atan2 at inference time. `models/alignment_net/model.py` already implements this 4-value version.
 - Loss: MSE, with yaw handled as sin/cos pair to avoid the wraparound discontinuity (predict 4 values total: pitch, roll, sin(yaw), cos(yaw), then reconstruct yaw with atan2).
 - Optimizer: Adam, lr 1e-3, cosine annealing over training.
 - Batch size: 128.
@@ -226,7 +226,7 @@ Before each update step, compute the disagreement between Channel A and Channel 
 
 Do not wait on Layer 1's trained models to start this section. The filter's process model, sigma-point math, and 4-source update logic can be built and unit-tested (Section 11.2) against synthetic sensor data and ground-truth-derived velocity with injected noise standing in for Channel A/B, entirely independent of whether the real models exist yet. Layer 1's real model outputs are only needed for the final validation step below (checking real drift numbers against IO-VNBD), which is a later checkpoint, not the starting point.
 
-1. Prototype in Python first, using `filterpy`'s UnscentedKalmanFilter class or a custom implementation if filterpy's API does not fit the 4-source update cleanly. Validate against the IO-VNBD held-out routes using the benchmark replay tool (Section 8).
+1. Prototype in Python first, using `filterpy`'s UnscentedKalmanFilter class or a custom implementation if filterpy's API does not fit the 4-source update cleanly. Validate against the IO-VNBD held-out routes using the benchmark replay tool (Section 9).
 2. Once the filter logic and tuning (Q, R matrices, thresholds) are locked, port to C++ using Eigen. This becomes a shared library (`fusion_core`) linked by both the Android native bridge and the edge engine.
 3. Sigma point parameters: alpha = 1e-3, beta = 2, kappa = 0 (standard starting values, tune alpha if the filter is numerically unstable).
 4. GNSS quality classifier for hand-off timing: a simple rule-based check first (satellite count, HDOP, sudden position jump detection), upgrade to a small learned classifier only if the rule-based version proves insufficient during testing. Target hand-off to INS-only mode under 200 milliseconds from GNSS loss detection.
