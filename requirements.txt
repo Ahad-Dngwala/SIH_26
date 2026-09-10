@@ -1,0 +1,36 @@
+# Python 3.11 - shared environment for Layer 1 (data/models) and the
+# Python side of Layer 2 (fusion_core/python_prototype, map_matching,
+# tools/benchmark_replay). See docker/ml.Dockerfile and Section 2 of the
+# Master Implementation Plan for context on each choice.
+
+# --- Training (Section 2) ---
+torch>=2.2,<3.0
+pytorch-lightning>=2.2,<3.0
+wandb>=0.16          # optional per Section 2 ("or plain CSV logging if W&B is not available") -
+                     # do not fail a script just because wandb.login() hasn't been run
+
+# --- Export / quantization (Section 4.6) ---
+onnx>=1.15
+onnxruntime>=1.17
+# onnx2tf              # uncomment if a team member needs the TFLite export path (Section 2) instead of ONNX Runtime Mobile
+
+# --- Data pipeline (Section 3) ---
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+
+# --- Evaluation (Section 4.7) ---
+scikit-learn>=1.4
+
+# --- Fusion core Python prototype (Section 5.5) ---
+filterpy>=1.4.5
+
+# --- Map matching (Section 6) ---
+osmnx>=1.9
+
+# --- Benchmark replay tool (Section 9) ---
+matplotlib>=3.8
+
+# --- Misc ---
+pyyaml>=6.0
+tqdm>=4.66

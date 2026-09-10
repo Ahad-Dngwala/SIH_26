@@ -1,0 +1,56 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# ---- Data (large, not committed - see data/README.md) ----
+data/raw/*
+!data/raw/README.md
+data/processed/*
+!data/processed/README.md
+
+# ---- Trained model artifacts / experiment tracking ----
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.ckpt
+norm_stats.json
+wandb/
+*.log
+
+# ---- Per-vehicle calibration adapters (generated on-device) ----
+*.adapter
+
+# ---- C++ build ----
+build/
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.a
+CMakeCache.txt
+CMakeFiles/
+
+# ---- Android ----
+android_app/**/.gradle/
+android_app/**/build/
+android_app/**/local.properties
+android_app/**/*.iml
+android_app/**/.cxx/
+.idea/
+
+# ---- Map data extracts (large, regenerated at build time - see map_matching/osm_extraction/README.md) ----
+map_matching/osm_extraction/*.osm.pbf
+map_matching/osm_extraction/*.graph
+
+# ---- OS / editor ----
+.DS_Store
+*.swp
+.vscode/

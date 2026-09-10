@@ -1,0 +1,21 @@
+# MIP Section 4.1
+model:
+  input_channels: 9        # accel xyz, gyro xyz, mag xyz
+  window_length: 200       # 2s @ 100Hz
+  output_dim: 4             # [pitch, roll, sin(yaw), cos(yaw)] - see model.py docstring re: spec discrepancy (MIP text literally says 3)
+
+loss: mse                  # applied to the 4 raw outputs
+
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  schedule: cosine_annealing
+
+train:
+  batch_size: 128
+  epochs: 60
+  early_stopping_patience: 10
+
+target:
+  metric: mean_angular_error_degrees
+  threshold: 3               # mean angular error under 3 degrees on held-out routes

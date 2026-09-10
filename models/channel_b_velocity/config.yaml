@@ -1,0 +1,23 @@
+# MIP Section 4.3
+model:
+  input_channels: 3          # accel xyz only, no gyro
+  window_length: 400         # 4s @ 100Hz (longer than Channel A's 2s)
+  conv_channels: [32, 64, 128, 128]
+  kernel_size: 7
+  stride: 2
+
+loss: mae
+
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  schedule: cosine_annealing
+
+train:
+  batch_size: 128
+  epochs: 90
+  early_stopping_patience: 12
+
+target:
+  metric: velocity_rmse_mps
+  threshold_range: [1.5, 2.0]   # deliberately less accurate than Channel A - cross-check role, not primary accuracy
