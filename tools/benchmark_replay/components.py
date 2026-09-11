@@ -188,17 +188,80 @@ class DummyConstantVelocityFusion:
 
 
 class RealUkfFusion:
-    """Placeholder for fusion_core/python_prototype/ (MIP Section 5).
-    Import and wrap the real UKF here once Layer 2 Person A has a
-    working prototype - see fusion_core/README.md for the state-vector
-    contract [pn, pe, vn, ve, psi, ba, bg]."""
+    """Wraps fusion_core/python_prototype/ukf.py's DualChannelUkf
+    (MIP Section 5) behind this module's FusionCore protocol. Bridges
+    the benchmark tool's per-step call shape (single FusionState in,
+    single FusionState out, no persistent object of its own) onto the
+    UKF wrapper's stateful `step()`, which needs to be constructed once
+    with an initial state and then carries its own x/P across calls -
+    so the actual UKF instance is lazily created on first `step()` and
+    reused after that, ignoring the `state` argument on every call
+    after the first (the UKF's internal state is the source of truth
+    once it exists, per the protocol's own state-threading contract
+    being just a convenience for the dummy fusion cores that don't
+    keep internal state).
+    """
 
-    def __init__(self, *_args, **_kwargs) -> None:
-        raise NotImplementedError(
-            "Real UKF not implemented yet - fusion_core/python_prototype/ "
-            "is empty. Use components.fusion: dummy in config.yaml until "
-            "Layer 2 Person A delivers a prototype (MIP Section 5.5)."
+    def __init__(self, road_signature_confidence_threshold: float = 0.85) -> None:
+        from fusion_core.python_prototype.ukf import DualChannelUkf, FusionConfig
+
+        self._DualChannelUkf = DualChannelUkf
+        self._config = FusionConfig(
+            road_signature_confidence_threshold=road_signature_confidence_threshold
         )
+        self._ukf = None
+
+    def step(
+        self,
+        state: FusionState,
+        dt: float,
+        accel_body: np.ndarray,
+        gyro_yaw: float,
+        channel_a_speed: float,
+        channel_b_speed: float,
+        gnss_pos: np.ndarray | None,
+        road_signature: RoadSignatureResult,
+        road_signature_threshold: float = 0.85,
+    ) -> FusionState:
+        from fusion_core.python_prototype.ukf import UkfState
+
+        if self._ukf is None:
+            self._ukf = self._DualChannelUkf(
+                UkfState(pos=state.pos.copy(), vel=state.vel.copy(), heading=state.heading),
+                self._config,
+            )
+
+        road_signature_pos = None
+        if road_signature.segment_id is not None:
+            # tools/benchmark_replay's RoadSignatureResult (this
+            # module) carries only a segment_id/confidence pair, not a
+            # position - the real road-signature classifier's segment
+            # midpoint lookup (MIP Section 4.4) isn't wired up here
+            # yet. Nothing in this repo currently produces a non-None
+            # segment_id (DummyRoadSignatureEstimator never does, and
+            # RealRoadSignatureEstimator isn't implemented), so this
+            # branch is unreachable today - kept explicit rather than
+            # silently dropped so the gap is visible when a real
+            # classifier lands.
+            raise NotImplementedError(
+                "RealUkfFusion received a road-signature match with no "
+                "position lookup wired up - the real road-signature "
+                "classifier (MIP Section 4.4) needs to supply the "
+                "segment's midpoint position, not just a segment_id, "
+                "before this path can be exercised."
+            )
+
+        result = self._ukf.step(
+            dt=dt,
+            gyro_yaw=gyro_yaw,
+            channel_a_speed=channel_a_speed,
+            channel_b_speed=channel_b_speed,
+            gnss_pos=gnss_pos,
+            gnss_vel=None,  # benchmark tool's Route has no GNSS-velocity channel (route_loader.py)
+            road_signature_pos=road_signature_pos,
+            road_signature_confidence=road_signature.confidence,
+        )
+        return FusionState(pos=result.pos, vel=result.vel, heading=result.heading)
 
 
 # --- Map matching -------------------------------------------------------------
@@ -270,7 +333,7 @@ def build_components(config: dict) -> ComponentSet:
     fusion = (
         DummyConstantVelocityFusion()
         if which["fusion"] == "dummy"
-        else RealUkfFusion()
+        else RealUkfFusion(road_signature_confidence_threshold=threshold)
     )
     map_matching = (
         DummyMapMatcher()
