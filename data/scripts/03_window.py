@@ -33,6 +33,24 @@ with their window configs in WINDOW_CONFIGS but no label-derivation
 function yet - see the TODOs below and Section 12's stated priority
 order (Channel B second, road-signature third, calibration adapter
 last) before implementing them.
+
+QUALITY GATE (added after 02_align.py's xcorr-fallback run on real
+IO-VNBD data showed 8/71 synchronised sessions are not reliably
+aligned - 6 below --min-corr even after a +/-10s lag search, 2 with an
+undefined/NaN correlation, see that script's docstring): this script
+used to window every `_aligned.parquet` file it found with no regard
+for whether the alignment was actually any good, which meant a session
+like Vta03 (corr=-0.02, almost certainly a mis-paired V/S file) would
+have gone straight into training data with zero indication anything
+was wrong. It now reads `alignment_report.json` from --aligned-dir (if
+present) and skips any session whose recorded corr is null or below
+--min-corr, printing exactly which sessions were skipped and why. Pass
+--include-flagged to window everything anyway (e.g. to inspect what a
+bad session's windows actually look like) - it prints a loud warning
+banner when used so it's never silently on. If alignment_report.json
+is missing, this script warns loudly and falls back to windowing every
+aligned file with no gate, so an out-of-date data/raw/_aligned/ from
+before this quality gate existed doesn't fail quietly either.
 """
 
 from __future__ import annotations
@@ -128,12 +146,32 @@ BUILDERS = {
 }
 
 
+def _load_alignment_quality(aligned_dir: Path) -> dict[str, dict] | None:
+    """Read alignment_report.json written by 02_align.py, if present.
+    Returns None (not {}) when the file is missing, so the caller can
+    tell "no report, gate disabled" apart from "report exists, empty".
+    """
+    report_path = aligned_dir / "alignment_report.json"
+    if not report_path.exists():
+        return None
+    return json.loads(report_path.read_text())
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, choices=list(WINDOW_CONFIGS.keys()))
     ap.add_argument("--manifest", default="data/processed/split_manifest.json")
     ap.add_argument("--aligned-dir", default="data/raw/_aligned")
     ap.add_argument("--out-dir", default="data/processed")
+    ap.add_argument("--min-corr", type=float, default=0.5,
+                     help="Sessions with a recorded GPS-speed/velocity_kmh correlation below this "
+                          "(per alignment_report.json) are skipped rather than windowed. Should "
+                          "normally match whatever --min-corr 02_align.py was run with.")
+    ap.add_argument("--include-flagged", action="store_true",
+                     help="Window every aligned session regardless of recorded correlation, "
+                          "including ones 02_align.py flagged as low-confidence or undefined. "
+                          "Off by default - only use this deliberately (e.g. to inspect what a "
+                          "bad session's windows look like), never to silently widen the dataset.")
     args = ap.parse_args()
 
     if args.model not in BUILDERS:
@@ -149,8 +187,24 @@ def main() -> None:
     aligned_dir = Path(args.aligned_dir)
     out_root = Path(args.out_dir) / args.model
 
+    quality = _load_alignment_quality(aligned_dir)
+    if quality is None:
+        print(
+            f"WARNING: no alignment_report.json found in {aligned_dir} - the alignment quality "
+            "gate is DISABLED and every *_aligned.parquet file will be windowed with no check on "
+            "how good that alignment actually was. Re-run 02_align.py (it always writes this "
+            "report) unless you have a specific reason to skip the gate."
+        )
+    if args.include_flagged:
+        print(
+            "WARNING: --include-flagged is set - low-confidence and undefined-correlation "
+            "sessions will be windowed anyway. Do not use this for a dataset that trains a model "
+            "you intend to keep."
+        )
+
     per_split: dict[str, list] = {"train": [], "val": [], "test": []}
     per_split_meta: dict[str, list] = {"train": [], "val": [], "test": []}
+    skipped: list[tuple[str, str]] = []
 
     for sid, info in manifest["sessions"].items():
         split = info.get("split")
@@ -159,6 +213,20 @@ def main() -> None:
         aligned_path = aligned_dir / f"{sid}_aligned.parquet"
         if not aligned_path.exists():
             continue
+
+        if quality is not None and not args.include_flagged:
+            entry = quality.get(sid)
+            if entry is None:
+                skipped.append((sid, "no entry in alignment_report.json"))
+                continue
+            corr = entry.get("corr")
+            if corr is None:
+                skipped.append((sid, "undefined (NaN) alignment correlation"))
+                continue
+            if corr < args.min_corr:
+                skipped.append((sid, f"alignment corr={corr:.2f} below --min-corr={args.min_corr}"))
+                continue
+
         df = pd.read_parquet(aligned_path)
         try:
             windows, labels = builder(df, cfg)
@@ -169,6 +237,12 @@ def main() -> None:
             continue
         per_split[split].append((windows, labels))
         per_split_meta[split].extend([sid] * len(windows))
+
+    if skipped:
+        print(f"\n{len(skipped)} session(s) skipped due to low-confidence alignment (see --include-flagged to override):")
+        for sid, reason in skipped:
+            print(f"  {sid}: {reason}")
+        print()
 
     for split, chunks in per_split.items():
         split_dir = out_root / split
