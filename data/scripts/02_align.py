@@ -22,23 +22,52 @@ xcorr fallback that activates when (a)'s resulting alignment looks
 wrong (correlation between GPS speed and velocity_kmh below
 --min-corr after the naive join).
 
-VERIFIED against real IO-VNBD sessions (see 02_align.py run output,
-71 synchronised sessions): (a) alone leaves 15/71 sessions below
---min-corr=0.5, some strongly negative (e.g. Vta03: -0.71). The xcorr
-fallback below searches a bounded lag window and re-aligns on
-whichever shift maximizes correlation, which is enabled by default
-(--xcorr-fallback / --no-xcorr-fallback to toggle) since it only does
-extra work for sessions that already failed the naive join - it can't
-make an already-good alignment worse. A session that STILL comes back
-below --min-corr after the lag search is not a timing-offset problem
-- most likely a V/S file mis-pairing, a unit/sign issue in one of the
-streams, or a session where the vehicle simply wasn't moving for most
-of the overlap (std ~ 0, correlation undefined/noisy either way) - and
-should be excluded or hand-inspected rather than trusted for training,
-per data/processed/README.md's "don't let this go stale silently"
-instruction. See alignment_report.json written alongside the output
-for the per-session corr/lag actually used, so that decision doesn't
-have to be re-derived from stdout scrollback.
+VERIFIED against real IO-VNBD sessions (71 synchronised, --max-lag
+widened to its current default of 10.0s after the first pass at 5.0s
+showed several sessions pinned at that edge): 53/71 pass the naive
+zero-lag join outright, the lag search recovers 10 more (corr 0.58 to
+0.91), and 6 are still below --min-corr=0.5 after the full +/-10s
+search (S2, S3b, S4, Vta03, Vw07, Y1) - since the search window is now
+wide and several of these still sit on its edge (see BOUNDARY NOTE),
+this reads as a mis-paired V/S file or a sign/unit issue rather than a
+timing problem. 2 more (Vw01, Vw15) come back with an undefined (NaN)
+correlation - inspect these by hand, don't assume either bucket.
+
+One recovered session, Vta20 (corr=0.58 at lag=+10.00s), is worth a
+second look even though it clears --min-corr: its winning lag also
+sits exactly on the search boundary, so - per the BOUNDARY NOTE below -
+0.58 is likely a floor, not the true achievable correlation. It's not
+in the "still flagged" bucket because it does pass the threshold, but
+`note` is still "boundary" for it in alignment_report.json for exactly
+this reason - don't read a "boundary" note as synonymous with "bad
+enough to exclude", the two are independent signals.
+
+PERFORMANCE NOTE (verified - the naive brute-force version of this
+search took ~7 min of 100% CPU on a real machine for the ~16 flagged
+sessions and was silently doing it with no progress output, which
+looked like a hang): the lag search below does NOT rebuild the full
+multi-column merged DataFrame for every candidate lag. It resamples
+only the two speed channels once (velocity_kmh, gps_speed_kmh) onto a
+coarse uniform grid at `--lag-step` spacing, then scores every
+candidate lag as a cheap integer-index slice + np.corrcoef on those
+two 1-D arrays - no DataFrame construction, no per-column
+interpolation, no merge, per candidate. The expensive full-column
+_build_merge() now runs exactly once per session, at the winning lag.
+
+BOUNDARY NOTE (also verified - 7/16 fallback sessions landed exactly
+on the +/-5.0s edge of the old default --max-lag): landing on the
+boundary means the search didn't converge to an interior optimum, so
+the true best offset is probably further out. main() now detects this
+(abs(lag) >= max_lag - one lag_step) and calls it out by name instead
+of quietly reporting a number that likely isn't the true optimum.
+
+NAN NOTE (also verified - real output had 2 sessions with corr=NaN
+after the fallback ran, e.g. a constant-value speed channel or too
+little overlap at every candidate lag, which the *previous* version
+of this script silently wrote to disk without appearing in EITHER the
+"recovered" or "still flagged" summary - worse than reporting a low
+number, since it looked like nothing was wrong). NaN-correlation
+sessions are now their own explicit bucket.
 """
 
 from __future__ import annotations
@@ -56,6 +85,11 @@ def _build_merge(v: pd.DataFrame, s: pd.DataFrame, lag_s: float) -> tuple[pd.Dat
     a shared 100Hz grid, shifting s's clock forward by lag_s seconds
     relative to v before resampling. lag_s > 0 means "s's timestamp t
     corresponds to v's timestamp t - lag_s" (s lags v).
+
+    This does the FULL multi-column resample + merge - expensive, and
+    should only be called once per session (at lag=0.0 for the naive
+    attempt, and again at the winning lag if the fallback search finds
+    a better one). The search itself uses `_lag_search` below instead.
     """
     s_shifted = s.copy()
     s_shifted["time_s"] = s_shifted["time_s"] + lag_s
@@ -86,19 +120,70 @@ def _build_merge(v: pd.DataFrame, s: pd.DataFrame, lag_s: float) -> tuple[pd.Dat
     return merged, corr
 
 
+def _resample_1d(time_s: pd.Series, value: pd.Series, dt: float) -> np.ndarray:
+    """Interpolate one column onto a uniform grid from t=0 (both
+    streams are already zeroed to their own start before this is
+    called) at spacing dt. Coarser than the 100Hz output grid on
+    purpose - plenty of resolution to score a lag, far cheaper to
+    build over and over during the search.
+    """
+    t = time_s.to_numpy(dtype=float)
+    v = value.to_numpy(dtype=float)
+    grid = np.arange(0.0, t[-1], dt)
+    return np.interp(grid, t, v)
+
+
+def _lag_search(
+    va: np.ndarray, sa: np.ndarray, dt: float, max_lag_s: float, min_overlap_s: float
+) -> tuple[float, float]:
+    """Score every integer-sample shift of `sa` against `va` and return
+    (best_corr, best_lag_s). No DataFrame, no interpolation inside the
+    loop - just index slicing and np.corrcoef on the two arrays already
+    built once by the caller. best_corr is -inf if nothing scoreable
+    was found (every candidate too short an overlap, or zero variance).
+    """
+    max_k = int(round(max_lag_s / dt))
+    min_overlap_n = max(2, int(round(min_overlap_s / dt)))
+    best_corr, best_k = -np.inf, 0
+    for k in range(-max_k, max_k + 1):
+        if k == 0:
+            continue
+        if k >= 0:
+            i0, i1 = k, min(len(va), len(sa) + k)
+        else:
+            i0, i1 = 0, min(len(va), len(sa) + k)
+        if i1 - i0 < min_overlap_n:
+            continue
+        v_sub = va[i0:i1]
+        s_sub = sa[i0 - k:i1 - k]
+        if v_sub.std() == 0 or s_sub.std() == 0:
+            continue
+        c = float(np.corrcoef(v_sub, s_sub)[0, 1])
+        if c > best_corr:
+            best_corr, best_k = c, k
+    return best_corr, best_k * dt
+
+
 def align_pair(
     v: pd.DataFrame,
     s: pd.DataFrame,
     min_corr: float,
     xcorr_fallback: bool = True,
-    max_lag_s: float = 5.0,
+    max_lag_s: float = 10.0,
     lag_step_s: float = 0.05,
-) -> tuple[pd.DataFrame, float, float]:
+    min_overlap_s: float = 10.0,
+) -> tuple[pd.DataFrame, float, float, str | None]:
     """Zero both streams' time axis to their own start, align on the
     shared 100Hz grid, and - if the naive (zero-lag) alignment scores
     below min_corr and xcorr_fallback is enabled - search a bounded
-    lag window for the shift that maximizes GPS-speed/velocity_kmh
-    correlation. Returns (merged, corr_achieved, lag_s_used).
+    lag window (cheaply, see _lag_search) for the shift that maximizes
+    GPS-speed/velocity_kmh correlation, then do the one expensive full
+    merge at that winning lag.
+
+    Returns (merged, corr_achieved, lag_s_used, note), where note is
+    None, "boundary" (best lag found sits on the edge of the searched
+    window - the true optimum is probably further out, widen
+    --max-lag), or "no-speed-columns" (search couldn't run at all).
     """
     v = v.copy()
     s = s.copy()
@@ -108,20 +193,22 @@ def align_pair(
 
     merged, corr = _build_merge(v, s, 0.0)
     best_lag = 0.0
+    note = None
 
     if xcorr_fallback and (np.isnan(corr) or corr < min_corr):
-        best_corr = corr if not np.isnan(corr) else -np.inf
-        best_merged = merged
-        for lag in np.arange(-max_lag_s, max_lag_s + 1e-9, lag_step_s):
-            if lag == 0.0:
-                continue
-            m2, c2 = _build_merge(v, s, lag)
-            if not np.isnan(c2) and c2 > best_corr:
-                best_corr, best_lag, best_merged = c2, float(lag), m2
-        if best_corr > (corr if not np.isnan(corr) else -np.inf):
-            merged, corr = best_merged, best_corr
+        if "velocity_kmh" not in v.columns or "gps_speed_kmh" not in s.columns:
+            note = "no-speed-columns"
+        else:
+            va = _resample_1d(v["time_s"], v["velocity_kmh"], lag_step_s)
+            sa = _resample_1d(s["time_s"], s["gps_speed_kmh"], lag_step_s)
+            search_corr, search_lag = _lag_search(va, sa, lag_step_s, max_lag_s, min_overlap_s)
+            if search_corr > (corr if not np.isnan(corr) else -np.inf):
+                merged, corr = _build_merge(v, s, search_lag)
+                best_lag = search_lag
+                if abs(best_lag) >= max_lag_s - lag_step_s / 2:
+                    note = "boundary"
 
-    return merged, corr, best_lag
+    return merged, corr, best_lag, note
 
 
 def main() -> None:
@@ -137,10 +224,13 @@ def main() -> None:
                           "lag window for the shift that maximizes correlation instead of accepting "
                           "the naive join as-is. On by default - use --no-xcorr-fallback to reproduce "
                           "the old naive-only behaviour.")
-    ap.add_argument("--max-lag", type=float, default=5.0,
+    ap.add_argument("--max-lag", type=float, default=10.0,
                      help="Seconds of lag to search in either direction when --xcorr-fallback triggers.")
     ap.add_argument("--lag-step", type=float, default=0.05,
                      help="Grid step (seconds) for the lag search.")
+    ap.add_argument("--min-overlap", type=float, default=10.0,
+                     help="Minimum seconds of overlap required for a candidate lag to be scoreable - "
+                          "guards against a tiny, coincidentally-correlated sliver at an extreme lag.")
     args = ap.parse_args()
 
     manifest = json.loads(Path(args.manifest).read_text())
@@ -148,11 +238,19 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    sessions = [(sid, info) for sid, info in manifest["sessions"].items()]
     still_flagged = []
     recovered = []
+    boundary_hit = []
+    undefined = []
     report = {}
     n_ok = 0
-    for sid, info in manifest["sessions"].items():
+    n_paired = sum(
+        1 for sid, _ in sessions
+        if (resampled_dir / f"{sid}_V.parquet").exists() and (resampled_dir / f"{sid}_S.parquet").exists()
+    )
+    done = 0
+    for sid, info in sessions:
         v_path = resampled_dir / f"{sid}_V.parquet"
         s_path = resampled_dir / f"{sid}_S.parquet"
         if not (v_path.exists() and s_path.exists()):
@@ -160,22 +258,29 @@ def main() -> None:
         v = pd.read_parquet(v_path)
         s = pd.read_parquet(s_path)
         try:
-            merged, corr, lag_used = align_pair(
-                v, s, args.min_corr, args.xcorr_fallback, args.max_lag, args.lag_step
+            merged, corr, lag_used, note = align_pair(
+                v, s, args.min_corr, args.xcorr_fallback, args.max_lag, args.lag_step, args.min_overlap
             )
         except Exception as e:  # noqa: BLE001
             print(f"FAILED aligning {sid}: {e}")
             continue
+        done += 1
+        print(f"[{done}/{n_paired}] {sid}: corr={corr:.2f}" if not np.isnan(corr) else f"[{done}/{n_paired}] {sid}: corr=NaN",
+              f"(lag={lag_used:+.2f}s)" if lag_used else "")
         merged.to_parquet(out_dir / f"{sid}_aligned.parquet")
         n_ok += 1
-        report[sid] = {"corr": corr, "lag_s": lag_used}
-        if not np.isnan(corr) and corr < args.min_corr:
+        report[sid] = {"corr": None if np.isnan(corr) else corr, "lag_s": lag_used, "note": note}
+        if np.isnan(corr):
+            undefined.append(sid)
+        elif corr < args.min_corr:
             still_flagged.append((sid, corr, lag_used))
         elif lag_used != 0.0:
             recovered.append((sid, corr, lag_used))
+        if note == "boundary":
+            boundary_hit.append((sid, corr, lag_used))
 
     (out_dir / "alignment_report.json").write_text(json.dumps(report, indent=2))
-    print(f"Aligned {n_ok} synchronised session(s) -> {out_dir}")
+    print(f"\nAligned {n_ok} synchronised session(s) -> {out_dir}")
 
     if recovered:
         print(f"\n{len(recovered)} session(s) recovered via xcorr-fallback lag search:")
@@ -185,15 +290,37 @@ def main() -> None:
     if still_flagged:
         print(
             f"\n{len(still_flagged)} session(s) STILL have low GPS-speed/velocity_kmh "
-            f"correlation after the lag search (below --min-corr={args.min_corr}) - this is "
-            "no longer a timing-offset problem (the search already tried +/-"
-            f"{args.max_lag}s), so it's most likely a mis-paired V/S file, a sign/unit issue "
-            "in one of the streams, or a session where the vehicle wasn't moving for most of "
-            "the overlap. Exclude these from training or inspect by hand before windowing:"
+            f"correlation after the lag search (below --min-corr={args.min_corr}) - if not also "
+            "listed under the boundary warning below, this is no longer a timing-offset problem, "
+            "so it's most likely a mis-paired V/S file, a sign/unit issue in one of the streams, "
+            "or a session where the vehicle wasn't moving for most of the overlap. Exclude these "
+            "from training or inspect by hand before windowing:"
         )
         for sid, corr, lag in still_flagged:
             print(f"  {sid}: best corr={corr:.2f} (best lag tried: {lag:+.2f}s)")
-        print(f"\nFull per-session corr/lag written to {out_dir / 'alignment_report.json'}")
+
+    if undefined:
+        print(
+            f"\n{len(undefined)} session(s) have UNDEFINED correlation (NaN) even after the lag "
+            "search - every candidate lag either had too little overlap (< --min-overlap) or a "
+            "zero-variance speed channel (e.g. GPS stuck / vehicle stationary the whole session). "
+            "These were still written to disk but are NOT verified aligned - do not window them "
+            "without inspecting by hand:"
+        )
+        for sid in undefined:
+            print(f"  {sid}")
+
+    if boundary_hit:
+        print(
+            f"\n{len(boundary_hit)} session(s) landed exactly on the +/-{args.max_lag:.1f}s edge of "
+            "the search window - the search did not converge to an interior optimum, so this lag "
+            "is probably not the true best offset. Re-run with a larger --max-lag for these:"
+        )
+        for sid, corr, lag in boundary_hit:
+            print(f"  {sid}: corr={corr:.2f} at lag={lag:+.2f}s (boundary)")
+
+    if still_flagged or undefined or boundary_hit:
+        print(f"\nFull per-session corr/lag/note written to {out_dir / 'alignment_report.json'}")
 
 
 if __name__ == "__main__":
