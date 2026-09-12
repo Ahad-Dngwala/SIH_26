@@ -25,7 +25,16 @@ def export_to_onnx(
     input_names: list[str] | None = None,
     output_names: list[str] | None = None,
 ) -> None:
-    """Export a trained, eval()-mode model to ONNX with opset 17."""
+    """Export a trained, eval()-mode model to ONNX with opset 17.
+
+    dynamo=False pins the legacy TorchScript-based exporter. torch's
+    newer dynamo-based exporter (default since 2.x) targets opset 18
+    internally and then tries to downconvert to our requested 17,
+    which produces a graph with broken shape info (seen here as a
+    batch-dimension mismatch that then breaks quantize_dynamic_int8's
+    shape inference) - not something this fixed-shape, mobile-target
+    export needs.
+    """
     model.eval()
     torch.onnx.export(
         model,
@@ -35,11 +44,41 @@ def export_to_onnx(
         input_names=input_names or ["input"],
         output_names=output_names or ["output"],
         dynamic_axes=None,  # fixed batch=1 for mobile, per Section 4.6 step 1
+        dynamo=False,
     )
 
 
 def quantize_dynamic_int8(onnx_path: str | Path, output_path: str | Path) -> None:
     quantize_dynamic(str(onnx_path), str(output_path), weight_type=QuantType.QInt8)
+
+
+def quantize_float16(onnx_path: str | Path, output_path: str | Path) -> None:
+    """Section 4.6 step 3 fallback: float16 instead of int8, for a model
+    that fails the 5% accuracy-drop check under int8.
+    """
+    import onnx
+    from onnxconverter_common import float16
+
+    model = onnx.load(str(onnx_path))
+    model_fp16 = float16.convert_float_to_float16(model, keep_io_types=True)
+    onnx.save(model_fp16, str(output_path))
+
+
+def load_lightning_state_dict(checkpoint_path: str | Path, prefix: str = "model.") -> dict:
+    """Load a raw nn.Module state_dict out of a pytorch_lightning
+    checkpoint. Lightning wraps the underlying model as `self.model` in
+    every LightningModule here (see each model's train.py) and saves
+    the whole module's state under the checkpoint's "state_dict" key
+    with that `model.` prefix on every key - strip it so it matches
+    the plain nn.Module's own state_dict() naming.
+    """
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+    raw_state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    stripped = {
+        (k[len(prefix):] if k.startswith(prefix) else k): v
+        for k, v in raw_state_dict.items()
+    }
+    return stripped
 
 
 def verify_quantized_accuracy(
