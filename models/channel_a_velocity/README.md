@@ -33,9 +33,13 @@ constraints (no lateral slip, no vertical velocity) are enforced
 downstream in the UKF process model (Section 5), not here. Keep this a
 pure regressor - don't add NHC logic to `model.py` or `train.py`.
 
-**Status:** scaffolded, untrained. `model.py` is a first-draft
-transcription of Section 4.2 - verify shapes with the Section 11.1
-fixed-seed forward-pass test before trusting it. `dataset.py` is not
-wired to real data yet (blocked on `data/processed/`, see Section 3).
+**Status:** wired, not yet trained. `dataset.py` loads real windows
+from `data/processed/channel_a_velocity/` (Section 3 output).
+`model.py`'s architecture is a first-draft transcription of Section
+4.2, covered by the Section 11.1 shape/fixed-seed test in `tests/`.
+`export.py` runs end to end (checkpoint -> ONNX -> int8, float16
+fallback on a failed accuracy check) - verified against synthetic data
+in `models/_smoketest_train_export.py`, not yet against a real
+checkpoint. No training run against real data has happened yet.
 
 **Current best metric:** none - no training run has happened yet.

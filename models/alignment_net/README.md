@@ -32,10 +32,13 @@ stop patience 10.
 
 **Target:** mean angular error under 3 degrees on held-out routes.
 
-**Status:** scaffolded, untrained. `model.py`'s architecture is a
-first-draft transcription of Section 4.1 - it has not run against real
-data. Verify shapes with the Section 11.1 fixed-seed forward-pass test
-before trusting it. `dataset.py` is not wired to real data yet
-(blocked on `data/processed/`, see Section 3).
+**Status:** wired, not yet trained. `dataset.py` loads real windows
+from `data/processed/alignment_net/` (Section 3 output). `model.py`'s
+architecture is a first-draft transcription of Section 4.1, covered by
+the Section 11.1 shape/fixed-seed test in `tests/`. `export.py` runs
+end to end (checkpoint -> ONNX -> int8, float16 fallback on a failed
+accuracy check) - verified against synthetic data in
+`models/_smoketest_train_export.py`, not yet against a real checkpoint.
+No training run against real data has happened yet.
 
 **Current best metric:** none - no training run has happened yet.
