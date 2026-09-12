@@ -205,3 +205,15 @@ TEST(UkfTrustWeightingTest, ChannelADownweightedOnDisagreement) {
   const double fusedSpeed = state.vel.norm();
   EXPECT_LT(std::abs(fusedSpeed - 16.7), std::abs(fusedSpeed - 40.0));
 }
+
+TEST(UkfNhcTest, DisabledByDefault) {
+  // Regression guard for a real finding (see FusionConfig::enable_nhc's
+  // docstring, ukf.hpp): enabling NHC measurably hurts drift on this
+  // system's synthetic constant-turn benchmark, because Channel A/B's
+  // own MIP-specified design already bakes in the same
+  // zero-lateral-velocity assumption NHC asserts a second time. If
+  // this ever fails because someone flipped the default to true,
+  // that's a deliberate design change - it should come with a fresh
+  // ablation re-run and a docstring update, not a silent flip.
+  EXPECT_FALSE(FusionConfig().enable_nhc);
+}

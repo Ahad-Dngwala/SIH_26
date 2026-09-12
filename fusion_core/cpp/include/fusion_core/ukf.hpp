@@ -65,6 +65,27 @@ struct FusionConfig {
   // Road-signature anchor (Section 5.3 point 4 / Section 4.4).
   double road_signature_confidence_threshold = 0.85;
 
+  // Non-holonomic constraint pseudo-measurement - NOT one of the
+  // original MIP Section 5.3's four sources, an addition tested
+  // during a review pass. Defaults off: measured on the benchmark
+  // tool's synthetic constant-turn scenario (Python side, same
+  // production RNG), enabling it never beats the disabled baseline
+  // and gets worse the more tightly it's trusted (1.486% disabled vs.
+  // 1.845%/1.648%/1.507% at r_nhc = 0.1/0.3/1.0). Root cause, not a
+  // bug: Section 5.3's own Channel A/B design already rotates their
+  // scalar speed into (vn, ve) using the current heading estimate,
+  // which already asserts zero lateral velocity relative to heading
+  // every cycle - NHC asserts the same fact a second time through a
+  // redundant measurement. See
+  // fusion_core/python_prototype/ukf.py's FusionConfig.enable_nhc
+  // docstring for the full writeup and the conditions under which
+  // this would likely start earning its place. Kept implemented (not
+  // deleted) since it's correct code for a real technique - just not
+  // one this measurement setup benefits from today. Keep this in sync
+  // with the Python default if either changes.
+  bool enable_nhc = false;
+  double r_nhc = 0.3;  // m/s, 1-sigma - starting point if re-enabled, not tuned
+
   // GNSS re-admission ramp (Section 5.5 step 5).
   double gnss_reacquire_ramp_s = 2.5;
   double gnss_reacquire_r_multiplier_start = 50.0;

@@ -48,6 +48,14 @@ Eigen::VectorXd hxPositionVelocity(const Eigen::VectorXd& x) {
 
 Eigen::VectorXd hxVelocity(const Eigen::VectorXd& x) { return Eigen::Vector2d(x(VN), x(VE)); }
 
+// See FusionConfig::enable_nhc's docstring (ukf.hpp) - not one of the
+// original MIP Section 5.3's four sources, defaults off.
+Eigen::VectorXd hxNhc(const Eigen::VectorXd& x) {
+  Eigen::VectorXd z(1);
+  z(0) = -x(VN) * std::sin(x(PSI)) + x(VE) * std::cos(x(PSI));
+  return z;
+}
+
 }  // namespace
 
 DualChannelUkf::DualChannelUkf(const UkfState& initialState, const FusionConfig& config)
@@ -160,6 +168,19 @@ UkfState DualChannelUkf::step(double dt, double gyroYaw, double channelASpeed,
   ukf_->update(zB, Eigen::MatrixXd::Identity(2, 2) * config_.r_channel_b * config_.r_channel_b,
                hxVelocity);
   ukf_->stabilizeCovariance();
+
+  // Non-holonomic constraint - see FusionConfig::enable_nhc's
+  // docstring (off by default; measured net-neutral-to-negative on
+  // the one benchmark tested, for a specific understood reason).
+  if (config_.enable_nhc) {
+    ukf_->refreshSigmas();
+    Eigen::VectorXd zNhc(1);
+    zNhc(0) = 0.0;
+    Eigen::MatrixXd rNhc(1, 1);
+    rNhc(0, 0) = config_.r_nhc * config_.r_nhc;
+    ukf_->update(zNhc, rNhc, hxNhc);
+    ukf_->stabilizeCovariance();
+  }
 
   // Road-signature drift-anchor (Section 5.3 point 4 / Section 4.4
   // deployment rule): only applied above the confidence threshold, as

@@ -45,3 +45,9 @@ as an installed library yet; same open items as the Python prototype
 (no real IO-VNBD validation, road-signature anchor untested against a
 real classifier, Q/R not tuned against real sensor noise) since this
 is a faithful port, not new tuning work.
+
+Also ported: the NHC pseudo-measurement (`enable_nhc` in
+`FusionConfig`, defaults `false`) and its regression-guard test - see
+`../python_prototype/README.md`'s ablation table and root-cause
+writeup for why it's implemented but off by default. Keep both
+languages' defaults in sync if this changes.

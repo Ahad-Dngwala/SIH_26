@@ -193,3 +193,17 @@ def test_channel_a_downweighted_on_disagreement():
     fused_speed = float(np.linalg.norm(state.vel))
     # Should sit far closer to Channel B's 16.7 than to Channel A's 40.
     assert abs(fused_speed - 16.7) < abs(fused_speed - 40.0)
+
+
+def test_nhc_disabled_by_default():
+    """Regression guard for a real finding (see FusionConfig.enable_nhc's
+    docstring): enabling the NHC pseudo-measurement measurably hurts
+    drift on this system's synthetic constant-turn benchmark, because
+    Channel A/B's own MIP-specified design (rotating scalar speed by
+    the current heading estimate) already bakes in the same
+    zero-lateral-velocity assumption NHC asserts a second time. If
+    this test ever fails because someone flipped the default to
+    True, that's a deliberate design change, not a typo - it should
+    come with a fresh ablation re-run (see this file's git history for
+    the numbers) and a docstring update, not a silent flip."""
+    assert FusionConfig().enable_nhc is False

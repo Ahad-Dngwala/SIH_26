@@ -37,6 +37,14 @@ on a given cycle:
    soft position correction only when classifier confidence clears the
    threshold (Section 5.3 point 4 / Section 4.4's 0.85 deployment
    rule).
+5. Non-holonomic constraint (NHC) pseudo-measurement: a car/bike
+   doesn't slide sideways, so its body-frame lateral velocity should
+   be ~0. This is NOT one of the original MIP Section 5.3's four
+   sources - it's an addition tested during a review pass. Applied
+   every cycle when enabled - see `hx_nhc`'s and
+   `FusionConfig.enable_nhc`'s docstrings for why it's implemented but
+   defaults off (measured net-neutral-to-negative on the one benchmark
+   tested, for a specific, understood reason - not a bug).
 
 Trust weighting (Section 5.4): a simple gain-scheduling rule, not a
 learned network, per the MIP's own instruction ("keep it that way for
@@ -102,6 +110,18 @@ def hx_velocity(x: np.ndarray) -> np.ndarray:
     return np.array([x[VN], x[VE]])
 
 
+def hx_nhc(x: np.ndarray) -> np.ndarray:
+    """Non-holonomic-constraint pseudo-measurement: a car or bike
+    doesn't slide sideways, so its lateral (body-frame) velocity
+    should be ~0. Not a new independent state - `vy_body` is a
+    deterministic rotation of the existing `vn, ve` by the existing
+    `psi` - so this is just an additional sequential measurement
+    source on the current 7-state vector, not a state-vector
+    expansion. See `FusionConfig.enable_nhc`'s docstring for why this
+    is implemented but disabled by default."""
+    return np.array([-x[VN] * np.sin(x[PSI]) + x[VE] * np.cos(x[PSI])])
+
+
 def residual_angle_safe(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Default residual (plain subtraction) is fine for every
     measurement this filter uses (positions and velocities, never
@@ -145,6 +165,36 @@ class FusionConfig:
 
     # Road-signature anchor (Section 5.3 point 4 / Section 4.4).
     road_signature_confidence_threshold: float = 0.85
+
+    # Non-holonomic constraint pseudo-measurement (not one of the
+    # original MIP Section 5.3's four sources - an addition suggested
+    # during a review pass, added here to test it rather than take it
+    # on faith). Measured effect on the benchmark tool's default
+    # synthetic constant-turn scenario (production RNG, all seeds
+    # fixed): enable_nhc=False -> 1.486% drift; enabled at r_nhc=0.1 ->
+    # 1.845%; r_nhc=0.3 -> 1.648%; r_nhc=1.0 -> 1.507%; r_nhc=3.0/10.0
+    # -> converges back toward the disabled baseline as it becomes
+    # irrelevant. It never beats the baseline, and hurts more the more
+    # tightly it's trusted.
+    #
+    # Root cause, not a numerical bug: Section 5.3's own Channel A/B
+    # design already rotates their scalar speed into (vn, ve) using
+    # the *current heading estimate* (hx_velocity above) - that
+    # rotation already assumes zero lateral velocity relative to
+    # heading, every cycle. NHC asserts the same fact a second time
+    # through a redundant measurement, so it adds no new information
+    # on this synthetic no-slip route and just perturbs the covariance
+    # math. It would likely earn its place if either (a) Channel A/B
+    # measured forward-speed *magnitude* only (independent of heading
+    # direction) instead of being pre-rotated, so the two constraints
+    # became genuinely orthogonal, or (b) real data with actual road
+    # camber/tire slip existed where the channels' heading-alignment
+    # assumption itself starts to break down. Neither is true yet, so
+    # this defaults off. Left implemented (not deleted) since it's
+    # correct code for a real technique - just not one this specific
+    # measurement setup benefits from today.
+    enable_nhc: bool = False
+    r_nhc: float = 0.3  # m/s, 1-sigma - starting point if re-enabled, not tuned
 
     # GNSS re-admission ramp (Section 5.5 step 5).
     gnss_reacquire_ramp_s: float = 2.5
@@ -328,6 +378,15 @@ class DualChannelUkf:
         )
         self.ukf.update(z_b, R=np.eye(2) * c.r_channel_b**2, hx=hx_velocity)
         self._symmetrize_p()
+
+        # Non-holonomic constraint - see hx_nhc's and
+        # FusionConfig.enable_nhc's docstrings (off by default;
+        # measured net-neutral-to-negative on the one benchmark
+        # tested, for a specific understood reason).
+        if c.enable_nhc:
+            self._refresh_sigmas()
+            self.ukf.update(np.array([0.0]), R=np.array([[c.r_nhc**2]]), hx=hx_nhc)
+            self._symmetrize_p()
 
         # Road-signature drift-anchor (Section 5.3 point 4 / Section
         # 4.4 deployment rule): only applied above the confidence

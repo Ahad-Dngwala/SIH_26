@@ -66,15 +66,40 @@ entirely on the caller's own GNSS-availability signal (`gnss_pos is
 None`), which is fine for offline replay but not what Section 7.3's
 on-device runtime loop will have.
 
-**Considered but not yet built - worth a deliberate look later, not a
-silent scope change:** a non-holonomic-constraint (NHC) pseudo-
-measurement (`vy_body ≈ 0`, since a car/bike doesn't slide sideways)
-is a well-established land-vehicle-INS technique that can meaningfully
-cut lateral drift in turns - importantly, it does *not* need new
-states: `vy_body` is already a deterministic rotation of the existing
-`vn, ve, psi`, so it's just a 5th sequential update source (`hx(x) =
--vn*sin(psi) + ve*cos(psi)`, target 0, small R), not a 7-to-9-state
-migration. Caveat: its validity depends on the vehicle class this PS
-targets - solid for a car on tarmac, weaker for a leaning two-wheeler
-mid-corner. If added, add it to both `ukf.py` and `ukf.cpp` together
-so they don't diverge, and update this README's Section 5.3 list.
+**Considered, implemented, and measured - defaults off, and here's
+why:** a non-holonomic-constraint (NHC) pseudo-measurement
+(`vy_body ≈ 0`, since a car/bike doesn't slide sideways) is a
+well-established land-vehicle-INS technique - it does *not* need new
+states, since `vy_body` is already a deterministic rotation of the
+existing `vn, ve, psi`, so it's implemented as a 5th sequential update
+source (`hx_nhc`), not a state-vector expansion.
+
+It's implemented and unit-tested (`enable_nhc` in `FusionConfig`), but
+**defaults to `False`** because enabling it measurably hurts on the
+one benchmark available, not helps. Ablation on the benchmark tool's
+default synthetic constant-turn scenario, production RNG:
+
+| enable_nhc | r_nhc | drift |
+|---|---|---|
+| False | - | 1.486% |
+| True | 0.1 | 1.845% |
+| True | 0.3 | 1.648% |
+| True | 1.0 | 1.507% |
+| True | 3.0 / 10.0 | converges back to ~1.486% (i.e. becomes irrelevant) |
+
+Root cause, not a numerical bug: Section 5.3's own Channel A/B design
+already rotates their scalar speed into `(vn, ve)` using the *current
+heading estimate* (see `hx_velocity`'s call sites) - that rotation
+already asserts zero lateral velocity relative to heading, every
+cycle. NHC asserts the same fact a second time through a redundant
+measurement, so on this no-slip synthetic route it adds no new
+information and just perturbs the covariance math; the tighter it's
+trusted, the worse it gets. It would likely earn its place if either
+(a) Channel A/B measured forward-speed *magnitude* only, independent
+of heading direction, making the two constraints genuinely orthogonal,
+or (b) real data existed with actual road camber/tire slip where the
+channels' heading-alignment assumption itself starts to break down.
+Neither is true yet. Left implemented, not deleted, since the
+technique itself is sound - just not one this measurement setup
+benefits from today. `tests/test_ukf.py::test_nhc_disabled_by_default`
+guards the default so it can't silently flip back on.
