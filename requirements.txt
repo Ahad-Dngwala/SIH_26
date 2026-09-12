@@ -4,7 +4,9 @@
 # Master Implementation Plan for context on each choice.
 
 # --- Training (Section 2) ---
-torch>=2.2,<3.0
+
+torch==2.14.0        # NOTE: If you need GPU support on Windows, install the CUDA wheel FIRST 
+                     # using the instructions in models/README.md before running this file.
 pytorch-lightning>=2.2,<3.0
 wandb>=0.16          # optional per Section 2 ("or plain CSV logging if W&B is not available") -
                      # do not fail a script just because wandb.login() hasn't been run

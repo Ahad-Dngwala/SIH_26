@@ -19,6 +19,9 @@ data/processed/*
 *.onnx
 *.tflite
 
+# ---- PyTorch Lightning logs ----
+lightning_logs/
+
 # ---- Benchmark replay tool run output (Section 9 / 11.3) ----
 tools/benchmark_replay/output/
 *.pt
