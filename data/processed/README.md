@@ -19,25 +19,65 @@ re-reading all the preprocessing code. At minimum, record:
   see it referenced elsewhere (e.g. the benchmark replay tool in
   `tools/benchmark_replay/`, Section 9).
 
-## Current status (scripts written, not yet run against real data)
+## Current status (steps 1-4 run against real IO-VNBD data for `alignment_net` and `channel_a_velocity`)
 
-`data/scripts/` now has `download_iovnbd.py`, `00_build_manifest.py`
-through `05_split.py`, and `iovnbd_common.py`. Two things blocked
-actually running them end-to-end so far and need a human (or a fresh
-Claude session with working GitHub access) to close out before
-trusting any output here:
+The two blockers previously listed here are resolved:
 
-1. **GitHub's LFS batch API rate-limited the sandbox this was built
-   in** after the first object - the dataset's CSVs are Git-LFS
-   tracked (~200MB+ per split). `download_iovnbd.py`'s docstring has
-   the retry/small-batch approach.
-2. **The column-matching regexes in `iovnbd_common.py` (V_COLUMNS /
-   S_COLUMNS) are transcribed from the dataset's own paper
-   (`README_1.pdf` Tables 3-4), not yet verified against a real CSV
-   header row.** `01_resample.py` will fail loudly per-session (not
-   silently) if a header doesn't match - if that happens, fix the
-   regex, don't add a hardcoded column-index fallback (see
-   `match_columns()`'s docstring for why).
+1. **GitHub's LFS rate limit** was hit on the first attempt and cleared by
+   re-running `download_iovnbd.py` per its own docstring (`git lfs pull`
+   only re-fetches missing objects, so a retry doesn't re-download
+   everything).
+2. **The column-matching regexes in `iovnbd_common.py`** needed two
+   follow-up fixes once run against real CSV headers, not a full
+   rewrite: a gear regex correction + S-CSV encoding fallback
+   (`58d013a`), then an S-stream ms-to-seconds conversion fix and a
+   missing `pyarrow` dependency (`fe47b11`). `01_resample.py` failed
+   loudly per-session as designed, not silently, in both cases.
+
+**Manifest (`00_build_manifest.py`, seed 0):** 71 synchronised, paired
+V/S sessions discovered, split 70/15/15 by route:
+
+- train (50): S1, S2, S3a, S3b, S3c, V-Vfa02, Vta01b, Vta02, Vta03,
+  Vta04, Vta06, Vta07, Vta08, Vta09, Vta11, Vta12, Vta13, Vta15,
+  Vta16, Vta17, Vta19, Vta20, Vta21, Vta22, Vta24, Vta27, Vta28,
+  Vta29, Vtb03, Vtb04, Vtb05, Vtb06, Vtb07, Vtb08, Vtb09, Vtb10,
+  Vw01, Vw03, Vw05, Vw07, Vw09, Vw10, Vw11, Vw14a, Vw14b, Vw15,
+  Vw16a, Vw16b, Vw17, Y1
+- val (11): V-Vfa01, Vta01a, Vta05, Vta10, Vta14, Vta25, Vta30,
+  Vtb02, Vtb11, Vw06, Vw08
+- test (10): S4, Vta23, Vta26, Vtb01, Vtb12, Vw02, Vw04, Vw12, Vw13,
+  Vw14c
+
+This is the held-out split anything downstream (including the
+benchmark replay tool, Section 9) should treat as ground truth for
+what "held-out" means - re-run `00_build_manifest.py --seed 0` to
+reproduce it exactly, don't hand-edit `split_manifest.json`.
+
+**Alignment (`02_align.py`, `--min-corr=0.5 --max-lag=10.0`):** all 71
+sessions processed. 53 passed the naive zero-lag join outright, the
+xcorr-fallback lag search recovered 10 more (corr 0.58-0.91), 6 are
+still below `--min-corr` after the full +/-10s search (S2, S3b, S4,
+Vta03, Vw07, Y1 - reads as a mis-paired V/S file or sign/unit issue
+rather than a timing problem, per that script's docstring), and 2 have
+an undefined correlation (Vw01, Vw15 - not yet inspected by hand, see
+that script's NAN NOTE). Full per-session corr/lag/note in
+`data/raw/_aligned/alignment_report.json`.
+
+**Windowing (`03_window.py`) + normalization (`04_normalize.py`):** the
+alignment-quality gate added to `03_window.py` skips exactly the 8
+sessions flagged above (7 from train: S2, S3b, Vta03, Vw01, Vw07,
+Vw15, Y1; 1 from test: S4; 0 from val) for both implemented models.
+
+| model | train windows | val windows | test windows | input shape | label shape | norm_stats.json |
+|---|---|---|---|---|---|---|
+| `alignment_net` | 32,922 | 5,819 | 20,722 | (200, 9) | (4,) | written, no channel hit the std floor |
+| `channel_a_velocity` | 37,335 | 6,811 | 23,207 | (200, 6) | (1,) | written, no channel hit the std floor |
+
+**Leakage check (`05_split.py`):** no session_id appears in more than
+one split, for either model.
+
+`channel_b_velocity`, `road_signature`, `calibration_adapter` have not
+been run - see the last paragraph below for why.
 
 **Flagged fix to Section 3.2's own step order:** step 4 (normalize,
 train-split-only stats) structurally depends on step 5 (split by
@@ -58,8 +98,9 @@ builds inputs from `s_*` columns and labels from `v_*` (ground truth)
 columns; see that script's module docstring.
 
 Implemented in `03_window.py`: `alignment_net`, `channel_a_velocity`
-(Section 12's stated Person-A priority order). `channel_b_velocity`,
-`road_signature`, `calibration_adapter` have window configs defined
-but no label-derivation function yet - road-signature in particular
-needs a per-corridor OSM segment map (Section 6) that doesn't exist
-yet, not just this dataset.
+(Section 12's stated Person-A priority order) - both now windowed,
+normalized, and leakage-checked against real data as recorded above.
+`channel_b_velocity`, `road_signature`, `calibration_adapter` have
+window configs defined but no label-derivation function yet -
+road-signature in particular needs a per-corridor OSM segment map
+(Section 6) that doesn't exist yet, not just this dataset.
