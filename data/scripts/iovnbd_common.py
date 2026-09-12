@@ -80,7 +80,12 @@ V_COLUMNS: dict[str, str] = {
     "indicated_lat_g": r"indicated\s*lateral",
     "handbrake": r"handbrake",
     "gear_requested": r"gear\s*requested",
-    "gear": r"^gear$",
+    # NOTE: verified against a real header - "Gear (Number fof gear
+    # employed 1-5)" is never just the bare word "gear", so the
+    # previous `^gear$` (exact full-string match) could never hit.
+    # Match "gear" at the start of the header as long as it isn't the
+    # "gear requested" column (which has its own canonical key above).
+    "gear": r"^gear(?!\s*requested)",
     "engine_speed_rpm": r"engine\s*speed",
     "coolant_temp_c": r"coolant\s*temp",
     "clutch": r"clutch",
@@ -243,7 +248,18 @@ def discover_sessions(raw_root: Path) -> tuple[list[Session], list[str]]:
 # ---------------------------------------------------------------------------
 
 def load_csv(path: Path, schema: dict[str, str]) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    # NOTE: verified against real files - the S-*.csv (smartphone)
+    # files are not valid UTF-8 (some contain a stray 0xb2 byte, most
+    # likely a superscript-2 or degree-adjacent glyph carried over from
+    # whatever tool exported them on Windows). Try UTF-8 first since
+    # it's the common case and rejects anything genuinely corrupt, then
+    # fall back to cp1252 (a superset of latin-1 that covers the bytes
+    # Windows tools actually emit) rather than failing the whole file
+    # over one non-ASCII byte in a column we may not even keep.
+    try:
+        df = pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, encoding="cp1252")
     colmap = match_columns(list(df.columns), schema)
     out = df[[colmap[c] for c in colmap]].copy()
     out.columns = list(colmap.keys())
