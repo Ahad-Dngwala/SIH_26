@@ -50,44 +50,52 @@ class ChannelAVelocityNet(nn.Module):
     """Input: (batch, 6, 200) channels-first. Output: (batch, 1) forward
     velocity, m/s, for the window's LAST timestep.
 
-    FIX (was GlobalAvgPool1d): the label from
+    FIX #1 (was GlobalAvgPool1d): the label from
     data/scripts/03_window.py::build_channel_a is the ground-truth
-    velocity at the window's end, not an average over the window. Each
-    of the 200 causal positions out of the TCN stack sees a different
-    amount of context (position 0 has seen almost nothing, position
-    199 has seen the block stack's full receptive field), so averaging
-    all of them together blends "barely-informed early estimate" with
-    "fully-informed end-of-window estimate" into one smeared feature
-    vector that doesn't correspond to any single point in time - and
-    definitely not to the end-of-window instant the label is asking
-    for. Reading out position -1 directly (the only position whose
-    causal receptive field ends exactly at the window's last sample)
-    matches the label's actual timing.
+    velocity at the window's end, not an average over the window.
+    Reading out position -1 directly (the only position whose causal
+    receptive field ends exactly at the window's last sample) matches
+    the label's actual timing - GlobalAvgPool blended that with far
+    less-informed earlier positions.
 
-    Note: with this block's dilation schedule (1/2/4/8, kernel 3), the
-    causal receptive field is only 2*(1+2+4+8)+1 = 31 samples (~0.31s
-    at 100Hz) - much smaller than the 200-sample window. Taking the
-    last timestep means the network only ever conditions directly on
-    the most recent ~0.3s; it does not integrate the full 2s window at
-    any single position. That's probably fine for a point-in-time
-    velocity read-out (recent IMU dynamics dominate), but if the intent
-    is for the network to use the full window's context, the dilation
-    schedule needs widening - that would deviate from Section 4.2's
-    "4 dilated causal conv blocks" spec, so flag it back to whoever
-    owns the MIP rather than changing it here.
+    FIX #2 (dilations 1/2/4/8 -> 8/16/32/64, same doubling pattern,
+    8x the base): FIX #1 alone made results WORSE in practice (see the
+    metrics.csv that prompted this) - with dilations 1/2/4/8 the causal
+    receptive field feeding position -1 is only 2*(1+2+4+8)+1 = 31
+    samples (~0.31s @ 100Hz), so the last-timestep readout was only
+    ever seeing the most recent 0.3s of the 2s window, discarding the
+    rest. Widening dilation costs nothing MIP Section 4's "small on
+    purpose... do not scale up without re-checking the latency budget"
+    warning cares about: same kernel_size (3 taps per layer), same
+    channel widths, same param count, same multiply-add count per
+    output position - dilation only changes the spacing between the
+    existing 3 taps, not how many there are. New RF = 2*(8+16+32+64)+1
+    = 241 samples, comfortably covering the full 200-sample window, so
+    position -1 now genuinely conditions on the whole window instead of
+    a sliver of it.
+
+    This deviates from MIP Section 4.2's literal "dilations 1/2/4/8" -
+    document that back to the MIP rather than treating this file as the
+    silent source of truth.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        in_channels: int = 6,
+        channels: list[int] = (32, 64, 64, 128),
+        dilations: list[int] = (8, 16, 32, 64),
+        kernel_size: int = 3,
+        dropout: float = 0.2,
+    ):
         super().__init__()
-        channels = [6, 32, 64, 64, 128]
-        dilations = [1, 2, 4, 8]
+        all_channels = [in_channels, *channels]
         self.blocks = nn.ModuleList(
             [
-                TCNBlock(channels[i], channels[i + 1], kernel_size=3, dilation=dilations[i], dropout=0.2)
-                for i in range(4)
+                TCNBlock(all_channels[i], all_channels[i + 1], kernel_size=kernel_size, dilation=dilations[i], dropout=dropout)
+                for i in range(len(dilations))
             ]
         )
-        self.fc1 = nn.Linear(128, 64)
+        self.fc1 = nn.Linear(all_channels[-1], 64)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(64, 1)
 

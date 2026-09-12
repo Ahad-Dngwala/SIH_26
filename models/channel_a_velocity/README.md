@@ -15,13 +15,14 @@ channels-first (MIP states shape as `(200, 6)`; transposed in
 timestamp.
 
 **Architecture:** Temporal Convolutional Network, 4 dilated causal
-conv blocks (dilations 1/2/4/8, channels 32/64/64/128, kernel 3,
-residual connection per block, dropout 0.2 after each) - last-timestep
-readout (position -1, matches the label's end-of-window timing;
-was GlobalAvgPool, changed because averaging all 200 causal positions
-together smeared a fully-informed end-of-window feature with barely-
-informed early ones - see `model.py`'s docstring) - FC(128->64) - ReLU
-- FC(64->1). See `model.py`.
+conv blocks (dilations 8/16/32/64 - MIP says 1/2/4/8, widened with the
+same doubling pattern so the last-timestep readout below actually
+covers the full window, see `model.py`'s docstring; same channels
+32/64/64/128, kernel 3, residual connection per block, dropout 0.2
+after each, no change to param count or per-position compute) -
+last-timestep readout (position -1, matches the label's end-of-window
+timing; was GlobalAvgPool) - FC(128->64) - ReLU - FC(64->1). See
+`model.py`.
 
 **Loss:** Huber (delta 1.0) - more robust to the Unsynchronised-split
 augmentation data's labeling noise than plain MSE. **Optimizer:** Adam,
