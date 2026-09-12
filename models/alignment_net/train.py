@@ -34,11 +34,19 @@ class AlignmentNetModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        loss = self.loss_fn(self.model(x), y)
+        pred = self.model(x)
+        loss = self.loss_fn(pred, y)
         self.log("val_loss", loss)
-        # TODO(Layer 1): also log mean angular error in degrees (the
-        # real Section 4.1 target metric), via AlignmentNet.to_angles()
-        # on both prediction and label with a wraparound-safe angle diff.
+
+        # Section 4.1's real target metric: mean angular error in degrees,
+        # not the raw MSE loss. pitch/roll are plain angles; yaw comes
+        # back through atan2(sin, cos) so the diff below is wraparound-safe
+        # for all three.
+        pred_angles = torch.rad2deg(self.model.to_angles(pred))
+        true_angles = torch.rad2deg(self.model.to_angles(y))
+        diff = (pred_angles - true_angles + 180.0) % 360.0 - 180.0
+        mean_angular_error_deg = diff.abs().mean()
+        self.log("val_mean_angular_error_deg", mean_angular_error_deg)
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.parameters(), lr=self.hparams["optimizer"]["lr"])
@@ -49,7 +57,6 @@ class AlignmentNetModule(pl.LightningModule):
 def main(config_path: str):
     cfg = yaml.safe_load(open(config_path))
 
-    # TODO(Layer 1): point these at the real data/processed/ layout.
     stats_path = "data/processed/alignment_net/norm_stats.json"
     train_ds = AlignmentNetDataset("data/processed/alignment_net", "train", stats_path)
     val_ds = AlignmentNetDataset("data/processed/alignment_net", "val", stats_path)
