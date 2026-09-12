@@ -18,3 +18,48 @@ re-reading all the preprocessing code. At minimum, record:
   reproducible and so Layer 2/3 know what "held-out" means when they
   see it referenced elsewhere (e.g. the benchmark replay tool in
   `tools/benchmark_replay/`, Section 9).
+
+## Current status (scripts written, not yet run against real data)
+
+`data/scripts/` now has `download_iovnbd.py`, `00_build_manifest.py`
+through `05_split.py`, and `iovnbd_common.py`. Two things blocked
+actually running them end-to-end so far and need a human (or a fresh
+Claude session with working GitHub access) to close out before
+trusting any output here:
+
+1. **GitHub's LFS batch API rate-limited the sandbox this was built
+   in** after the first object - the dataset's CSVs are Git-LFS
+   tracked (~200MB+ per split). `download_iovnbd.py`'s docstring has
+   the retry/small-batch approach.
+2. **The column-matching regexes in `iovnbd_common.py` (V_COLUMNS /
+   S_COLUMNS) are transcribed from the dataset's own paper
+   (`README_1.pdf` Tables 3-4), not yet verified against a real CSV
+   header row.** `01_resample.py` will fail loudly per-session (not
+   silently) if a header doesn't match - if that happens, fix the
+   regex, don't add a hardcoded column-index fallback (see
+   `match_columns()`'s docstring for why).
+
+**Flagged fix to Section 3.2's own step order:** step 4 (normalize,
+train-split-only stats) structurally depends on step 5 (split by
+route) already having happened - you can't compute train-only stats
+before you know which routes are train. `00_build_manifest.py` now
+assigns the route-level train/val/test split *first*, before
+windowing or normalizing; `05_split.py` is a leakage check + report
+against that manifest rather than where the split is decided. See
+`00_build_manifest.py`'s module docstring for the full reasoning -
+don't re-derive the split anywhere else.
+
+**Flagged correction to Section 4's model input spec:** "input: accel
+xyz, gyro xyz[, mag xyz]" for alignment_net/channel_a/channel_b only
+makes sense as the *smartphone* (S-) stream - the vehicle (V-) CAN
+data has no raw IMU channels at all (Table 3), and the deployed system
+only ever has the phone's IMU at inference time anyway. `03_window.py`
+builds inputs from `s_*` columns and labels from `v_*` (ground truth)
+columns; see that script's module docstring.
+
+Implemented in `03_window.py`: `alignment_net`, `channel_a_velocity`
+(Section 12's stated Person-A priority order). `channel_b_velocity`,
+`road_signature`, `calibration_adapter` have window configs defined
+but no label-derivation function yet - road-signature in particular
+needs a per-corridor OSM segment map (Section 6) that doesn't exist
+yet, not just this dataset.
