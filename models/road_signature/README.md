@@ -37,6 +37,16 @@ problem even if overall accuracy looks fine.
 softmax max probability exceeds 0.85 (Section 5.3) - this threshold is
 consumed downstream by Layer 2, not enforced in this model itself.
 
+**Calibration note (flagged during a review pass, not yet acted on -
+no trained model exists to calibrate yet):** raw softmax confidence
+from a deep classifier is known to be poorly calibrated - a model can
+report 0.92 for a wrong segment just as easily as a right one. Before
+that 0.85 threshold is trusted for a real drift-reset, run the
+validation set through a temperature-scaling (or Platt-scaling) pass
+so a reported 0.85 actually corresponds to ~85% empirical accuracy at
+that confidence level, rather than tuning/trusting the threshold
+against raw, uncalibrated softmax output.
+
 **Status:** scaffolded, untrained, and blocked on real collected
 corridor data (Section 3.1's "secondary" dataset - IO-VNBD alone has no
 segment labels for an India-specific corridor). `model.py` is a

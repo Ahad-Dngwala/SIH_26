@@ -6,11 +6,11 @@ everything else feeds into. Prototyped in Python, then ported to C++
 for production; the shared library both `android_app/native/` and
 `edge_engine/src/` link against.
 
-**Python prototype has a first working version** - see
-`python_prototype/README.md` for what's implemented, tested, and
-still open. C++ port (`cpp/`) not started yet - blocked on the Python
-filter logic/tuning being locked first, per Section 5.5's own
-ordering.
+**Python prototype has a first working version, and the C++ port
+(`cpp/`) is now a 1:1 translation of it** - see `python_prototype/README.md`
+and `cpp/README.md` for what's implemented, tested, and still open in
+each. Not yet linked into `android_app/native/` or `edge_engine/src/`
+- both are still unstarted.
 
 **State vector (Section 5.1):** 7 states `[pn, pe, vn, ve, psi, ba,
 bg]` - position north/east (m), velocity north/east (m/s), heading

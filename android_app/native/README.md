@@ -21,3 +21,16 @@ between `../app/` and `fusion_core/cpp/`.
 
 Status: not yet started - blocked on `fusion_core/cpp/` existing to
 bridge to.
+
+**Design notes to carry into this work when it starts** (flagged
+during a review pass, not yet acted on since nothing here is built
+yet): (1) the native ring buffer above must be a pre-allocated
+fixed-size buffer (e.g. `std::array` with a rolling write index),
+never one that grows via `new`/`push_back` on the 100Hz hot path -
+repeated small allocations in a real-time native loop cause heap
+fragmentation and unpredictable stalls, defeating the whole point of
+avoiding JVM GC here. (2) the JNI bridge should use
+`ByteBuffer.allocateDirect()` on the Kotlin side so native code can
+read sensor windows via `GetDirectBufferAddress` without a copy each
+cycle - copying 2D sensor windows across JNI 100 times/second the
+naive way risks eating into the 40ms cycle budget (Section 7.3).

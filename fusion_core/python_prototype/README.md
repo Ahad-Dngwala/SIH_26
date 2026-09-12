@@ -65,3 +65,16 @@ real sensor noise; GNSS quality classifier for hand-off timing
 entirely on the caller's own GNSS-availability signal (`gnss_pos is
 None`), which is fine for offline replay but not what Section 7.3's
 on-device runtime loop will have.
+
+**Considered but not yet built - worth a deliberate look later, not a
+silent scope change:** a non-holonomic-constraint (NHC) pseudo-
+measurement (`vy_body ≈ 0`, since a car/bike doesn't slide sideways)
+is a well-established land-vehicle-INS technique that can meaningfully
+cut lateral drift in turns - importantly, it does *not* need new
+states: `vy_body` is already a deterministic rotation of the existing
+`vn, ve, psi`, so it's just a 5th sequential update source (`hx(x) =
+-vn*sin(psi) + ve*cos(psi)`, target 0, small R), not a 7-to-9-state
+migration. Caveat: its validity depends on the vehicle class this PS
+targets - solid for a car on tarmac, weaker for a leaning two-wheeler
+mid-corner. If added, add it to both `ukf.py` and `ukf.cpp` together
+so they don't diverge, and update this README's Section 5.3 list.
