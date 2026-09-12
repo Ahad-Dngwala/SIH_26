@@ -43,8 +43,13 @@ for whether the alignment was actually any good, which meant a session
 like Vta03 (corr=-0.02, almost certainly a mis-paired V/S file) would
 have gone straight into training data with zero indication anything
 was wrong. It now reads `alignment_report.json` from --aligned-dir (if
-present) and skips any session whose recorded corr is null or below
---min-corr, printing exactly which sessions were skipped and why. Pass
+present) and skips any session whose recorded corr is null, below
+--min-corr, or landed on the lag-search boundary (per 02_align.py's own
+docstring, a boundary lag means the search never converged to an
+interior optimum, so the recorded offset - and the label timing that
+depends on it - can't be trusted even though corr cleared --min-corr;
+e.g. Vta20 at corr=0.58, lag=+10.00s, exactly on the +/-10.0s edge),
+printing exactly which sessions were skipped and why. Pass
 --include-flagged to window everything anyway (e.g. to inspect what a
 bad session's windows actually look like) - it prints a loud warning
 banner when used so it's never silently on. If alignment_report.json
@@ -225,6 +230,16 @@ def main() -> None:
                 continue
             if corr < args.min_corr:
                 skipped.append((sid, f"alignment corr={corr:.2f} below --min-corr={args.min_corr}"))
+                continue
+            if entry.get("note") == "boundary":
+                skipped.append((
+                    sid,
+                    f"alignment lag landed on the search boundary (corr={corr:.2f}) - per "
+                    "02_align.py's own docstring this means the search didn't converge to an "
+                    "interior optimum, so the recorded lag is probably not the true offset. "
+                    "Re-run 02_align.py with a larger --max-lag for this session rather than "
+                    "training on it as-is.",
+                ))
                 continue
 
         df = pd.read_parquet(aligned_path)
