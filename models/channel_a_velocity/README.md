@@ -16,8 +16,12 @@ timestamp.
 
 **Architecture:** Temporal Convolutional Network, 4 dilated causal
 conv blocks (dilations 1/2/4/8, channels 32/64/64/128, kernel 3,
-residual connection per block, dropout 0.2 after each) - GlobalAvgPool
-- FC(128->64) - ReLU - FC(64->1). See `model.py`.
+residual connection per block, dropout 0.2 after each) - last-timestep
+readout (position -1, matches the label's end-of-window timing;
+was GlobalAvgPool, changed because averaging all 200 causal positions
+together smeared a fully-informed end-of-window feature with barely-
+informed early ones - see `model.py`'s docstring) - FC(128->64) - ReLU
+- FC(64->1). See `model.py`.
 
 **Loss:** Huber (delta 1.0) - more robust to the Unsynchronised-split
 augmentation data's labeling noise than plain MSE. **Optimizer:** Adam,

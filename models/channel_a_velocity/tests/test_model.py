@@ -17,24 +17,36 @@ def test_output_shape():
 
 
 def test_causal_no_lookahead():
-    """TCN blocks are supposed to be causal (Chomp1d) - output at the
-    window's end should not change if we perturb only a later timestep
-    ... but the whole window is fed at once and pooled globally, so
-    what we can actually check without a manual per-timestep forward is
-    that changing an early timestep still changes the (global-pooled)
-    output at all, i.e. the causal chomp didn't accidentally zero out
-    the whole receptive field.
+    """The model now reads out the causal feature at the window's last
+    timestep directly (no more global pooling across all 200
+    positions), so this can check real causality: with dilations
+    (1, 2, 4, 8) and kernel_size=3, the receptive field feeding
+    position -1 is 2*(1+2+4+8) + 1 = 31 samples, i.e. positions 169-199.
+
+    - Perturbing a timestep INSIDE that receptive field (e.g. 180)
+      must change the output.
+    - Perturbing a timestep OUTSIDE it (e.g. 0, the earliest sample)
+      must NOT change the output at all - if it does, the chomp is
+      leaking future/out-of-range context into a position that should
+      be blind to it.
     """
     torch.manual_seed(0)
     model = ChannelAVelocityNet()
     model.eval()
     x = torch.zeros(1, 6, 200)
-    x2 = x.clone()
-    x2[:, :, 0] = 5.0  # perturb the earliest timestep
+
+    x_in_rf = x.clone()
+    x_in_rf[:, :, 180] = 5.0  # inside the 31-sample receptive field of position -1
+    x_out_rf = x.clone()
+    x_out_rf[:, :, 0] = 5.0  # outside it
+
     with torch.no_grad():
-        out1 = model(x)
-        out2 = model(x2)
-    assert not torch.allclose(out1, out2)
+        out_base = model(x)
+        out_in_rf = model(x_in_rf)
+        out_out_rf = model(x_out_rf)
+
+    assert not torch.allclose(out_base, out_in_rf)
+    assert torch.allclose(out_base, out_out_rf)
 
 
 def test_fixed_seed_forward_pass():
