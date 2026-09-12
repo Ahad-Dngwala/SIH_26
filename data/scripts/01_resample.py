@@ -17,6 +17,22 @@ from iovnbd_common import S_COLUMNS, V_COLUMNS, load_csv, resample_100hz
 
 def resample_one(csv_path: Path, schema: dict[str, str], time_col: str, out_path: Path) -> None:
     df = load_csv(csv_path, schema)
+    if time_col == "time_ms":
+        # S-stream time is milliseconds-since-start-of-day (see
+        # 02_align.py, which already knows this and divides by 1000
+        # there). resample_100hz builds its grid as t*100 assuming t is
+        # in seconds - fed raw milliseconds, a ~10 minute drive's
+        # (t1 - t0) is ~600,000 instead of ~600, so the grid comes out
+        # ~1000x too long (hundreds of millions of points, multi-GiB
+        # arrays, the allocation failures/hang seen in testing).
+        # Convert to seconds here, once, before resampling, and rename
+        # so every stream downstream sees a consistent "time_s" column
+        # (02_align.py already falls back to "time_s" when "time_ms"
+        # isn't present, so this is backward compatible).
+        df = df.copy()
+        df["time_ms"] = df["time_ms"] / 1000.0
+        df = df.rename(columns={"time_ms": "time_s"})
+        time_col = "time_s"
     df_rs = resample_100hz(df, time_col)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df_rs.to_parquet(out_path)

@@ -18,6 +18,8 @@ onnxruntime>=1.17
 pandas>=2.1
 numpy>=1.26
 scipy>=1.11
+pyarrow>=14.0          # required parquet engine - pandas.to_parquet/read_parquet
+                       # raise "no usable engine" without this installed
 
 # --- Evaluation (Section 4.7) ---
 scikit-learn>=1.4
