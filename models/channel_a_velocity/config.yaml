@@ -3,7 +3,14 @@ model:
   input_channels: 6         # accel xyz, gyro xyz
   window_length: 200        # 2s @ 100Hz
   tcn_channels: [32, 64, 64, 128]
-  tcn_dilations: [1, 2, 4, 8]
+  tcn_dilations: [8, 16, 32, 64]   # MIP says [1, 2, 4, 8] - widened (same 8x doubling
+                                   # pattern, same kernel/channels/param count) because the
+                                   # model reads out only the window's LAST timestep (see
+                                   # model.py) and the old dilations gave that position a
+                                   # 31-sample (~0.3s) receptive field, far short of the
+                                   # 200-sample window. New RF = 241 samples, covers it.
+                                   # No latency-budget impact - dilation doesn't add taps
+                                   # or params, just spaces the existing 3 out further.
   kernel_size: 3
   dropout: 0.2
 

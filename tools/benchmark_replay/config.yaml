@@ -35,10 +35,10 @@ blackout:
 # deliver real implementations - see docs/HANDOFF_benchmark_replay_tool.md
 # section 9 ("Definition of done, by checkpoint").
 components:
-  channel_a: dummy          # dummy | real
-  channel_b: dummy          # dummy | real
-  road_signature: dummy     # dummy | real
-  fusion: dummy             # dummy | real  (real = fusion_core/python_prototype, empty as of this config)
+  channel_a: dummy          # dummy | real  (real = trained ONNX export, Section 4.2, not built yet)
+  channel_b: dummy          # dummy | real  (real = trained ONNX export, Section 4.3, not built yet)
+  road_signature: dummy     # dummy | real  (real = trained classifier + signature pack, Section 4.4, not built yet)
+  fusion: real              # dummy | real  (real = fusion_core/python_prototype/ukf.py, Checkpoint 1 met - see fusion_core/python_prototype/README.md)
   map_matching: dummy       # dummy | real  (dummy = identity passthrough, per handoff section 2)
 
 # Section 4 of the handoff doc - road-signature confidence threshold,

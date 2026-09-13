@@ -18,4 +18,16 @@ Per MIP Section 3.1:
 
 Whoever runs the download script should record exactly which IO-VNBD
 splits/version were pulled and when, so a stale local copy doesn't
-silently diverge from what teammates have.
+silently diverge from what teammates have. `download_iovnbd.py` writes
+this automatically to `IOVNBD_DOWNLOAD_MANIFEST.json` (commit SHA,
+timestamp, whether it was a full or `--skip-smudge`/`--include` pull).
+
+**Note on the repo's own folder structure**, found while building the
+pipeline: "Uncategorised IOVNB Dataset" is not a plain duplicate of
+"Categorised IOVNB Dataset" - some `S-*.csv` files differ between the
+two trees under the same session name, and Uncategorised has extra
+sessions (an "A-series", "T-series") absent from Categorised entirely.
+`iovnbd_common.discover_sessions()` builds the session list from
+Categorised only and reports (doesn't auto-include) the
+Uncategorised-only sessions - see that function's docstring before
+changing this.

@@ -48,26 +48,60 @@ class TCNBlock(nn.Module):
 
 class ChannelAVelocityNet(nn.Module):
     """Input: (batch, 6, 200) channels-first. Output: (batch, 1) forward
-    velocity, m/s."""
+    velocity, m/s, for the window's LAST timestep.
 
-    def __init__(self):
+    FIX #1 (was GlobalAvgPool1d): the label from
+    data/scripts/03_window.py::build_channel_a is the ground-truth
+    velocity at the window's end, not an average over the window.
+    Reading out position -1 directly (the only position whose causal
+    receptive field ends exactly at the window's last sample) matches
+    the label's actual timing - GlobalAvgPool blended that with far
+    less-informed earlier positions.
+
+    FIX #2 (dilations 1/2/4/8 -> 8/16/32/64, same doubling pattern,
+    8x the base): FIX #1 alone made results WORSE in practice (see the
+    metrics.csv that prompted this) - with dilations 1/2/4/8 the causal
+    receptive field feeding position -1 is only 2*(1+2+4+8)+1 = 31
+    samples (~0.31s @ 100Hz), so the last-timestep readout was only
+    ever seeing the most recent 0.3s of the 2s window, discarding the
+    rest. Widening dilation costs nothing MIP Section 4's "small on
+    purpose... do not scale up without re-checking the latency budget"
+    warning cares about: same kernel_size (3 taps per layer), same
+    channel widths, same param count, same multiply-add count per
+    output position - dilation only changes the spacing between the
+    existing 3 taps, not how many there are. New RF = 2*(8+16+32+64)+1
+    = 241 samples, comfortably covering the full 200-sample window, so
+    position -1 now genuinely conditions on the whole window instead of
+    a sliver of it.
+
+    This deviates from MIP Section 4.2's literal "dilations 1/2/4/8" -
+    document that back to the MIP rather than treating this file as the
+    silent source of truth.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 6,
+        channels: list[int] = (32, 64, 64, 128),
+        dilations: list[int] = (8, 16, 32, 64),
+        kernel_size: int = 3,
+        dropout: float = 0.2,
+    ):
         super().__init__()
-        channels = [6, 32, 64, 64, 128]
-        dilations = [1, 2, 4, 8]
+        all_channels = [in_channels, *channels]
         self.blocks = nn.ModuleList(
             [
-                TCNBlock(channels[i], channels[i + 1], kernel_size=3, dilation=dilations[i], dropout=0.2)
-                for i in range(4)
+                TCNBlock(all_channels[i], all_channels[i + 1], kernel_size=kernel_size, dilation=dilations[i], dropout=dropout)
+                for i in range(len(dilations))
             ]
         )
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(128, 64)
+        self.fc1 = nn.Linear(all_channels[-1], 64)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(64, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             x = block(x)
-        x = self.pool(x).squeeze(-1)
+        x = x[:, :, -1]  # causal feature at the window's last timestep, matches the label's timing
         x = self.relu(self.fc1(x))
         return self.fc2(x)

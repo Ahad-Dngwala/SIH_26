@@ -10,10 +10,11 @@ in data/processed/.
 
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from models.common.normalization import load_stats
+from models.common.normalization import apply, load_stats
 
 
 class AlignmentNetDataset(Dataset):
@@ -29,18 +30,30 @@ class AlignmentNetDataset(Dataset):
         self.processed_dir = Path(processed_dir)
         self.split = split
         self.norm_stats = load_stats(norm_stats_path)
-        # TODO(Layer 1): load the actual windows/labels for `split` from
-        # `processed_dir` once Section 3's output file format is decided.
-        # Do the (window_len, channels) -> (channels, window_len)
-        # transpose here in __getitem__, not upstream in processed/, so
-        # the on-disk format matches Section 3's own (200, 9) notation.
-        raise NotImplementedError(
-            "Wire this up to the real Section 3 output format once "
-            "data/processed/ exists - see data/processed/README.md."
-        )
+
+        split_dir = self.processed_dir / split
+        windows_path = split_dir / "windows.npy"
+        labels_path = split_dir / "labels.npy"
+        if not windows_path.exists() or not labels_path.exists():
+            raise FileNotFoundError(
+                f"{windows_path} / {labels_path} not found - run "
+                "data/scripts/03_window.py --model alignment_net first "
+                "(see data/processed/README.md)."
+            )
+
+        # (N, 200, 9) raw, matching 03_window.py's on-disk notation.
+        # Normalized and transposed to (9, 200) per-item below, not here,
+        # per this file's own docstring.
+        self.windows = np.load(windows_path)
+        self.labels = np.load(labels_path)
+        if len(self.windows) != len(self.labels):
+            raise ValueError(
+                f"windows/labels length mismatch in {split_dir}: "
+                f"{len(self.windows)} vs {len(self.labels)}"
+            )
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        return len(self.windows)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (window, label):
@@ -48,4 +61,7 @@ class AlignmentNetDataset(Dataset):
                 self.norm_stats.
             label: (4,) float32 - [pitch, roll, sin(yaw), cos(yaw)].
         """
-        raise NotImplementedError
+        window = apply(self.windows[idx : idx + 1], self.norm_stats)[0]  # (200, 9), normalized
+        window = torch.from_numpy(window).float().transpose(0, 1)  # -> (9, 200)
+        label = torch.from_numpy(self.labels[idx]).float()
+        return window, label

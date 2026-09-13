@@ -6,10 +6,11 @@ everything else feeds into. Prototyped in Python, then ported to C++
 for production; the shared library both `android_app/native/` and
 `edge_engine/src/` link against.
 
-**Not part of this scaffolding pass's code** - only the directory
-structure and this interface note are laid down here. Section 5's
-actual filter logic is separate work; see `python_prototype/README.md`
-and `cpp/README.md`.
+**Python prototype has a first working version, and the C++ port
+(`cpp/`) is now a 1:1 translation of it** - see `python_prototype/README.md`
+and `cpp/README.md` for what's implemented, tested, and still open in
+each. Not yet linked into `android_app/native/` or `edge_engine/src/`
+- both are still unstarted.
 
 **State vector (Section 5.1):** 7 states `[pn, pe, vn, ve, psi, ba,
 bg]` - position north/east (m), velocity north/east (m/s), heading

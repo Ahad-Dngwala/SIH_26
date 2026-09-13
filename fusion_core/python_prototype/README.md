@@ -17,6 +17,89 @@ Sigma point parameters to start from (Section 5.5 step 3): alpha =
 1e-3, beta = 2, kappa = 0 - tune alpha toward 1e-4 first if the filter
 is numerically unstable (Section 14).
 
-Status: not yet built. First task for Layer 2 Person A (Section 12),
-startable on day one against synthetic data - no dependency on Layer
-1.
+Status: **first working version built (`ukf.py`)**, using filterpy's
+`UnscentedKalmanFilter` with a custom CTCV `fx` and four separate `hx`
+functions (position, position+velocity, velocity-only), applied as
+sequential per-cycle updates per Section 5.3, since filterpy's UKF
+takes one measurement vector per `update()` call rather than a single
+stacked 4-source update.
+
+Implemented: 7-state CTCV process model (Section 5.2) with
+GNSS-available/blackout-specific Q (Section 5.2); GNSS position+
+velocity, Channel A, Channel B, and road-signature-anchor updates
+(Section 5.3); Channel A/B disagreement-based R inflation (Section
+5.4); GNSS re-admission ramp over `gnss_reacquire_ramp_s` (Section 5.5
+step 5). Sigma-point params at the Section 5.5 step 3 defaults; not
+yet tuned against real drift numbers (only synthetic so far).
+
+**Numerical-stability note for whoever touches this next:** filterpy's
+`update()` reuses the sigma points from the last `predict()` for every
+subsequent `update()` call in the same cycle - doing 3-4 sequential
+updates per cycle without accounting for this reliably drives `P`
+non-positive-definite within a handful of cycles. `DualChannelUkf`
+works around it by calling `compute_process_sigmas(dt=0, fx=identity)`
+between sequential updates (see `_refresh_sigmas` docstring) plus a
+per-cycle symmetrize-and-jitter pass on `P` (`_symmetrize_p`). Keep
+both if you refactor the update sequencing.
+
+Validated so far: unit tests in `tests/test_ukf.py` per Section 11.2
+(synthetic straight-line and constant-turn routes, GNSS-available
+convergence, blackout drift-bounding, road-signature anchor pull,
+Channel A/B disagreement down-weighting) - `python -m pytest
+fusion_core/python_prototype/tests/ -v`. Also wired into
+`tools/benchmark_replay/` as `RealUkfFusion` (`components.fusion:
+real` in that tool's `config.yaml`) - on the tool's synthetic
+constant-turn route this drops blackout drift from the dummy
+constant-velocity integrator's ~2.15% to ~1.49%.
+
+Not yet done: validated against real IO-VNBD routes (blocked on Layer
+1's data pipeline and `tools/benchmark_replay/route_loader.py`'s
+`load_io_vnbd_route`, per that tool's own README); the road-signature
+anchor path is untested against a real classifier (no non-None
+`segment_id`/position exists in this repo yet - see the
+`NotImplementedError` guard in
+`tools/benchmark_replay/components.py`'s `RealUkfFusion.step`); Q/R
+values are Section-5-consistent starting points, not yet tuned against
+real sensor noise; GNSS quality classifier for hand-off timing
+(Section 5.5 step 4) is not implemented here - this prototype relies
+entirely on the caller's own GNSS-availability signal (`gnss_pos is
+None`), which is fine for offline replay but not what Section 7.3's
+on-device runtime loop will have.
+
+**Considered, implemented, and measured - defaults off, and here's
+why:** a non-holonomic-constraint (NHC) pseudo-measurement
+(`vy_body ≈ 0`, since a car/bike doesn't slide sideways) is a
+well-established land-vehicle-INS technique - it does *not* need new
+states, since `vy_body` is already a deterministic rotation of the
+existing `vn, ve, psi`, so it's implemented as a 5th sequential update
+source (`hx_nhc`), not a state-vector expansion.
+
+It's implemented and unit-tested (`enable_nhc` in `FusionConfig`), but
+**defaults to `False`** because enabling it measurably hurts on the
+one benchmark available, not helps. Ablation on the benchmark tool's
+default synthetic constant-turn scenario, production RNG:
+
+| enable_nhc | r_nhc | drift |
+|---|---|---|
+| False | - | 1.486% |
+| True | 0.1 | 1.845% |
+| True | 0.3 | 1.648% |
+| True | 1.0 | 1.507% |
+| True | 3.0 / 10.0 | converges back to ~1.486% (i.e. becomes irrelevant) |
+
+Root cause, not a numerical bug: Section 5.3's own Channel A/B design
+already rotates their scalar speed into `(vn, ve)` using the *current
+heading estimate* (see `hx_velocity`'s call sites) - that rotation
+already asserts zero lateral velocity relative to heading, every
+cycle. NHC asserts the same fact a second time through a redundant
+measurement, so on this no-slip synthetic route it adds no new
+information and just perturbs the covariance math; the tighter it's
+trusted, the worse it gets. It would likely earn its place if either
+(a) Channel A/B measured forward-speed *magnitude* only, independent
+of heading direction, making the two constraints genuinely orthogonal,
+or (b) real data existed with actual road camber/tire slip where the
+channels' heading-alignment assumption itself starts to break down.
+Neither is true yet. Left implemented, not deleted, since the
+technique itself is sound - just not one this measurement setup
+benefits from today. `tests/test_ukf.py::test_nhc_disabled_by_default`
+guards the default so it can't silently flip back on.

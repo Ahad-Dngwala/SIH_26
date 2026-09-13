@@ -20,7 +20,14 @@ class ChannelAModule(pl.LightningModule):
     def __init__(self, cfg: dict):
         super().__init__()
         self.save_hyperparameters(cfg)
-        self.model = ChannelAVelocityNet()
+        mcfg = cfg["model"]
+        self.model = ChannelAVelocityNet(
+            in_channels=mcfg["input_channels"],
+            channels=mcfg["tcn_channels"],
+            dilations=mcfg["tcn_dilations"],
+            kernel_size=mcfg["kernel_size"],
+            dropout=mcfg["dropout"],
+        )
         self.loss_fn = nn.HuberLoss(delta=cfg["loss"]["delta"])
 
     def forward(self, x):
