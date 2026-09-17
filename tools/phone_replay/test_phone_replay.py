@@ -9,6 +9,8 @@ expensive; a failing test is free.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -35,6 +37,39 @@ def test_round_trip_preserves_samples(tmp_path, session):
     assert len(reloaded.gnss_t) == len(session.gnss_t)
     np.testing.assert_allclose(reloaded.accel_xyz, session.accel_xyz, atol=1e-4)
     np.testing.assert_allclose(reloaded.gyro_xyz, session.gyro_xyz, atol=1e-5)
+
+
+def test_magnetometer_round_trips(tmp_path, session):
+    """PS 26168 lists the magnetometer as an expected input. We do not
+    fuse it, but the log has to carry it or we cannot say that as a
+    choice."""
+    path = tmp_path / "s.jsonl"
+    write_session(path, session)
+    reloaded = read_session(path)
+
+    assert reloaded.has_magnetometer
+    assert reloaded.mag_xyz.shape == session.mag_xyz.shape
+    np.testing.assert_allclose(reloaded.mag_xyz, session.mag_xyz, atol=1e-2)
+
+
+def test_log_without_magnetometer_still_loads(tmp_path, session):
+    """Older logs, and any phone whose magnetometer is missing or
+    disabled, must not become unreadable. The stream is optional."""
+    path = tmp_path / "s.jsonl"
+    stripped = tmp_path / "no_mag.jsonl"
+    write_session(path, session)
+
+    with open(path, encoding="utf-8") as src, open(stripped, "w", encoding="utf-8") as dst:
+        for line in src:
+            record = json.loads(line)
+            for key in ("mx", "my", "mz"):
+                record.pop(key, None)
+            dst.write(json.dumps(record) + "\n")
+
+    reloaded = read_session(stripped)
+    assert not reloaded.has_magnetometer
+    assert len(reloaded.imu_t) == len(session.imu_t)
+    assert "magnetometer" in " ".join(reloaded.sanity_report())
 
 
 def test_truncated_final_line_is_tolerated(tmp_path, session):

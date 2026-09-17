@@ -21,6 +21,8 @@ Deliberately included, because they break naive code:
   * a full stop mid-route, so ZUPT has something to detect
   * a stationary window at the start, so leveling has something to use
   * ragged IMU timestamps, since Android never delivers a clean grid
+  * a magnetometer stream, which nothing consumes, so that the logger
+    and the schema are exercised on the optional fields too
 """
 
 from __future__ import annotations
@@ -102,9 +104,27 @@ def make_session(
     accel_vehicle = np.stack([longitudinal, lateral, np.full(n, GRAVITY)], axis=1)
     gyro_vehicle = np.stack([np.zeros(n), np.zeros(n), yaw_rate], axis=1)
 
+    # Magnetometer, microtesla, phone frame. A nominal mid-latitude
+    # field of 25 uT horizontal and 40 uT downward, rotated by vehicle
+    # heading and then by the mount. No hard-iron offset, no charger
+    # interference, no engine transients, so this stream is good for
+    # exercising the logger and the schema and for nothing else. Nothing
+    # in the fusion path reads it, by design.
+    field_world_h, field_world_v = 25.0, 40.0
+    mag_vehicle = np.stack(
+        [
+            field_world_h * np.cos(heading),
+            -field_world_h * np.sin(heading),
+            np.full(n, -field_world_v),
+        ],
+        axis=1,
+    )
+
     rotation = _mount_rotation(rng)
     accel_phone = accel_vehicle @ rotation.T
     gyro_phone = gyro_vehicle @ rotation.T
+    mag_phone = mag_vehicle @ rotation.T
+    mag_phone += rng.normal(0.0, 0.4, size=mag_phone.shape)
 
     accel_phone += rng.normal(0.0, 0.08, size=accel_phone.shape)
     accel_phone += rng.normal(0.0, 0.03, size=3)  # fixed bias per session
@@ -148,6 +168,7 @@ def make_session(
         gnss_bearing=gnss_bearing,
         gnss_accuracy=np.full(len(gnss_t), 3.0),
         gnss_withheld=np.zeros(len(gnss_t), dtype=bool),
+        mag_xyz=mag_phone,
     )
 
 

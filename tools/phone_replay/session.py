@@ -24,7 +24,8 @@ header, an IMU sample, or a GNSS fix, discriminated by `"type"`.
     {"type":"header","schema":1,"device":"...","started_utc":"...",
      "notes":"free text, e.g. phone flat on dash, Honda City"}
     {"type":"imu","t":<float seconds>,
-     "ax":..,"ay":..,"az":..,"gx":..,"gy":..,"gz":..}
+     "ax":..,"ay":..,"az":..,"gx":..,"gy":..,"gz":..,
+     "mx":..,"my":..,"mz":..}
     {"type":"gnss","t":<float seconds>,"lat":..,"lon":..,
      "speed":<m/s>,"bearing":<deg from north>,"accuracy":<m>,
      "withheld":<bool>}
@@ -41,6 +42,17 @@ Field notes, each of which is a thing that will otherwise go wrong:
   and cannot recover it once a vendor filter has removed it.
 * `gx..gz` are RAW `TYPE_GYROSCOPE`, rad/s, phone frame. Not
   `TYPE_ROTATION_VECTOR`.
+* `mx..mz` are RAW `TYPE_MAGNETIC_FIELD`, microtesla, phone frame, and
+  are OPTIONAL: a log without them loads fine and every number this
+  repo computes is unchanged. They are in the schema because PS 26168
+  names "accelerometer, gyroscope, and magnetometer/compass" as the
+  expected on-device inputs. Nothing in this repo consumes them today.
+  Registering one more listener is the difference between "we do not
+  use the magnetometer" and "we cannot", and only the first of those
+  is a design decision. Do not let them creep into the fusion path
+  without a measured reason: a magnetometer inside a steel car body,
+  next to a phone charger, is a heading source that is confidently
+  wrong rather than noisily right.
 * GNSS comes from `LocationManager.GPS_PROVIDER`, never the fused
   provider - see `tools/phone_replay/README.md` for why that
   distinction decides whether the experiment means anything.
@@ -85,8 +97,19 @@ class PhoneSession:
     gnss_accuracy: np.ndarray  # (M,) meters
     gnss_withheld: np.ndarray  # (M,) bool, True if hidden from the live filter
 
+    # Optional streams. Both are empty on a log that does not carry
+    # them, so `len(...) == 0` is the presence test. mag_xyz sits here
+    # rather than next to gyro_xyz only because a defaulted dataclass
+    # field cannot precede the undefaulted gnss_* ones; it is an IMU
+    # stream and is indexed in lockstep with imu_t when present.
+    mag_xyz: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
+
     fused_t: np.ndarray = field(default_factory=lambda: np.empty(0))
     fused_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
+
+    @property
+    def has_magnetometer(self) -> bool:
+        return len(self.mag_xyz) > 0
 
     @property
     def duration_s(self) -> float:
@@ -139,6 +162,13 @@ class PhoneSession:
                     "probably used by mistake and MountLeveling cannot work"
                 )
 
+        if not self.has_magnetometer:
+            problems.append(
+                "no magnetometer samples in this log - nothing here needs them, but "
+                "PS 26168 lists magnetometer among the expected inputs, so a "
+                "recording without them is weaker as evidence than it needs to be"
+            )
+
         if len(self.gnss_t) and not self.gnss_withheld.any():
             problems.append(
                 "no fix is marked withheld - this session contains no blackout, so "
@@ -181,6 +211,14 @@ def read_session(path: str | Path) -> PhoneSession:
                         record["gx"],
                         record["gy"],
                         record["gz"],
+                        # Magnetometer is optional and, on a real phone,
+                        # arrives on its own slower cadence, so a given
+                        # IMU record may carry no sample. NaN rather than
+                        # zero: zero is a plausible field reading and
+                        # would be silently averaged in later.
+                        record.get("mx", float("nan")),
+                        record.get("my", float("nan")),
+                        record.get("mz", float("nan")),
                     )
                 )
             elif kind == "gnss":
@@ -204,6 +242,12 @@ def read_session(path: str | Path) -> PhoneSession:
         raise ValueError(f"{path} contains no GNSS fixes")
 
     imu_arr = np.array(imu, dtype=float)
+    mag_arr = imu_arr[:, 7:10]
+    # A log where every magnetometer cell is NaN carried no magnetometer
+    # at all. Collapse that to an empty array so `has_magnetometer` is a
+    # straight answer rather than "yes, all NaN".
+    if not np.isfinite(mag_arr).any():
+        mag_arr = np.empty((0, 3))
     gnss_arr = np.array([g[:6] for g in gnss], dtype=float)
     withheld = np.array([g[6] for g in gnss], dtype=bool)
     fused_arr = np.array(fused, dtype=float) if fused else np.empty((0, 3))
@@ -222,6 +266,7 @@ def read_session(path: str | Path) -> PhoneSession:
         gnss_bearing=gnss_arr[:, 4],
         gnss_accuracy=gnss_arr[:, 5],
         gnss_withheld=withheld,
+        mag_xyz=mag_arr,
         fused_t=fused_arr[:, 0] - t0 if len(fused_arr) else np.empty(0),
         fused_pos=fused_arr[:, 1:3] if len(fused_arr) else np.empty((0, 2)),
     )
@@ -240,22 +285,23 @@ def write_session(path: str | Path, session: PhoneSession) -> None:
         header.update({"type": "header", "schema": SCHEMA_VERSION})
         handle.write(json.dumps(header) + "\n")
 
+        has_mag = session.has_magnetometer
         for i in range(len(session.imu_t)):
-            handle.write(
-                json.dumps(
-                    {
-                        "type": "imu",
-                        "t": round(float(session.imu_t[i]), 6),
-                        "ax": round(float(session.accel_xyz[i, 0]), 5),
-                        "ay": round(float(session.accel_xyz[i, 1]), 5),
-                        "az": round(float(session.accel_xyz[i, 2]), 5),
-                        "gx": round(float(session.gyro_xyz[i, 0]), 6),
-                        "gy": round(float(session.gyro_xyz[i, 1]), 6),
-                        "gz": round(float(session.gyro_xyz[i, 2]), 6),
-                    }
-                )
-                + "\n"
-            )
+            record = {
+                "type": "imu",
+                "t": round(float(session.imu_t[i]), 6),
+                "ax": round(float(session.accel_xyz[i, 0]), 5),
+                "ay": round(float(session.accel_xyz[i, 1]), 5),
+                "az": round(float(session.accel_xyz[i, 2]), 5),
+                "gx": round(float(session.gyro_xyz[i, 0]), 6),
+                "gy": round(float(session.gyro_xyz[i, 1]), 6),
+                "gz": round(float(session.gyro_xyz[i, 2]), 6),
+            }
+            if has_mag and np.isfinite(session.mag_xyz[i]).all():
+                record["mx"] = round(float(session.mag_xyz[i, 0]), 3)
+                record["my"] = round(float(session.mag_xyz[i, 1]), 3)
+                record["mz"] = round(float(session.mag_xyz[i, 2]), 3)
+            handle.write(json.dumps(record) + "\n")
 
         for i in range(len(session.gnss_t)):
             handle.write(

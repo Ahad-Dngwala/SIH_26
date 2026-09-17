@@ -62,6 +62,16 @@ wrong, in order of how often they will:
    session gives mount leveling a clean gravity window. There is a
    whole-session-mean fallback and the conversion report says when it
    was used, but the fallback is worse.
+5. **Log the magnetometer even though nothing reads it.** `mx,my,mz`
+   from `TYPE_MAGNETIC_FIELD` are optional fields on the IMU record and
+   no code in this repo consumes them. They are logged because PS 26168
+   names accelerometer, gyroscope and magnetometer as the expected
+   on-device inputs, and because one extra listener is the difference
+   between "we chose not to fuse the magnetometer" and "we cannot".
+   `sanity_report()` notes a log that lacks them. Fusing them is a
+   separate decision needing its own measurement: a magnetometer inside
+   a steel car body next to a charger is confidently wrong rather than
+   noisily right.
 
 ## Findings from building it
 
