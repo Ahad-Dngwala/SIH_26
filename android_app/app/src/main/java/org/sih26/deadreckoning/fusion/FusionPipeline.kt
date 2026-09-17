@@ -70,6 +70,11 @@ data class PipelineConfig(
     /** Speed above which a GNSS bearing is trusted for initial heading. At a
      * standstill the bearing is noise. */
     val minSpeedForBearingMps: Double = 3.0,
+    /** How long to wait for a fix above that speed before giving up and seeding the
+     * heading from whatever bearing is available. A session that never moves has no
+     * dead reckoning to measure anyway, but the pipeline should still start and say
+     * that its heading seed is untrusted rather than silently never initialise. */
+    val maxWaitForMovingFixS: Double = 60.0,
     /** Channel P is fed to the filter as Channel A's slot with this override, since
      * its measured R is nothing like Channel A's Section 4.2 target. */
     val useChannelP: Boolean = true,
@@ -96,6 +101,12 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
     var localFrame: LocalFrame? = null
         private set
 
+    /** False when the filter had to seed its heading from a fix taken at or near a
+     * standstill. Surface it: a session that starts this way has a heading the gyro
+     * will faithfully propagate and nothing will ever correct. */
+    var headingSeedTrusted: Boolean = false
+        private set
+
     private val forwardAxis = ForwardAxisEstimator()
     private val channelP = PhysicsSpeedChannel(config.physics)
     private val zuptDetector = ZuptDetector(config.zupt)
@@ -117,6 +128,8 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
     private var lastFix: GnssFix? = null
     private var lastAdmittedSpeed: Double? = null
     private var lastSpeedDelta: Double = 0.0
+    private var waitingForGnssSinceNs: Long? = null
+    private var lastAdmittedFixNs: Long? = null
     private var cyclesSinceAxisEstimate: Int = 0
 
     var blackout: Boolean = false
@@ -161,6 +174,7 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
             }
             // Fork the coast baseline from the fused state at the moment the lights
             // go out, so the two tracks are comparable from a common starting point.
+            forwardAxis.discardInterval()
             val current = ukf?.state()
             if (current != null) coastUkf = DualChannelUkf(current, config.fusion)
         } else {
@@ -236,15 +250,39 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
                     lastImuNs = tNs
                     return null
                 }
-                val ne = frame.toNorthEast(fix.latDeg, fix.lonDeg)
-                // Heading from GNSS bearing only once actually moving. At a
-                // standstill the bearing is noise, and seeding the filter with noise
-                // costs the whole session.
-                val heading = if (fix.speedMps >= config.minSpeedForBearingMps) {
-                    bearingDegToPsi(fix.bearingDeg)
-                } else {
-                    0.0
+
+                // Do not initialise on a fix taken at a standstill.
+                //
+                // This filter has no heading measurement at all: psi is seeded once
+                // and then propagated by the gyro, and the only thing that can
+                // correct it afterwards is the covariance coupling from a velocity
+                // residual. Seeding it while parked therefore sticks, and while
+                // parked it is unseedable: GNSS bearing at a standstill is noise,
+                // and the few metres of per-fix position noise push the filter's
+                // velocity in random directions, which drags psi with it. Once the
+                // vehicle moves off, Channel P rotates its speed by that wrong psi
+                // and reinforces it.
+                //
+                // Measured before this wait existed, on the synthetic session with a
+                // 1 Hz fix rate: 23 degrees of heading error by t=13 s and a fused
+                // track hundreds of metres off with GNSS fully available. The Python
+                // reference never hits this because its offline chain interpolates
+                // GNSS onto the 100 Hz grid, so its filter gets a position update
+                // every cycle and cannot wander between fixes. A phone gets one fix
+                // a second. This is exactly the class of difference the front-end
+                // gate exists to surface.
+                val movingEnough = fix.speedMps >= config.minSpeedForBearingMps
+                val waited = (tNs - (waitingForGnssSinceNs ?: tNs)) / NANOS_PER_SECOND
+                if (waitingForGnssSinceNs == null) waitingForGnssSinceNs = tNs
+
+                if (!movingEnough && waited < config.maxWaitForMovingFixS) {
+                    lastImuNs = tNs
+                    return null
                 }
+                headingSeedTrusted = movingEnough
+
+                val ne = frame.toNorthEast(fix.latDeg, fix.lonDeg)
+                val heading = bearingDegToPsi(fix.bearingDeg)
                 val initial = UkfState(
                     posN = ne[0],
                     posE = ne[1],
@@ -286,12 +324,20 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
         // offline version reaches in 3, which would leave Channel P silent through
         // most of a demo.
         val currentSpeed = fix?.speedMps ?: lastFix?.speedMps ?: 0.0
+        // No samples are buffered during a blackout: there is no speed reference to
+        // attribute them to, and attributing them to the next one that arrives is
+        // what corrupts the axis.
+        if (!blackout) forwardAxis.addSample(horizontal, currentSpeed)
         if (fix != null) {
             val previousSpeed = lastAdmittedSpeed
             lastSpeedDelta = if (previousSpeed == null) 0.0 else fix.speedMps - previousSpeed
+            val intervalS = lastAdmittedFixNs?.let { (fix.tNs - it) / NANOS_PER_SECOND } ?: 1.0
             lastAdmittedSpeed = fix.speedMps
+            lastAdmittedFixNs = fix.tNs
+            // The delta covers the samples since the previous fix, so it closes that
+            // interval rather than opening the next one.
+            forwardAxis.closeInterval(lastSpeedDelta, intervalS)
         }
-        forwardAxis.add(horizontal, currentSpeed, lastSpeedDelta)
         cyclesSinceAxisEstimate++
         if (forwardAxis.hasEnough() && cyclesSinceAxisEstimate >= AXIS_RECOMPUTE_CYCLES) {
             forwardAxis.estimate()
@@ -321,6 +367,7 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
 
         val gnssPos: DoubleArray?
         val gnssVel: DoubleArray?
+        var gnssHeading: Double? = null
         val frame = localFrame
         if (fix != null && frame != null) {
             gnssPos = frame.toNorthEast(fix.latDeg, fix.lonDeg)
@@ -329,6 +376,10 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
                 fix.speedMps * kotlin.math.cos(psi),
                 fix.speedMps * kotlin.math.sin(psi)
             )
+            // Course over ground is a real heading observation while moving and pure
+            // noise at a standstill, so it is gated on speed here rather than inside
+            // the filter.
+            if (fix.speedMps >= config.minSpeedForBearingMps) gnssHeading = psi
         } else {
             gnssPos = null
             gnssVel = null
@@ -343,7 +394,8 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
             gnssVel = gnssVel,
             rChannelAOverride = if (channelSpeed != null) config.physics.rMps else null,
             zupt = zuptActive,
-            rZupt = config.zupt.rMps
+            rZupt = config.zupt.rMps,
+            gnssHeading = gnssHeading
         )
 
         // Coast baseline: same gyro, no GNSS, no velocity channel.

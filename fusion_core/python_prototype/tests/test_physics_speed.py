@@ -86,6 +86,70 @@ def test_forward_axis_sign_follows_the_speed_reference():
     assert float(np.dot(forward, backward)) < -0.9
 
 
+def test_forward_axis_joint_estimator_survives_correlated_turn_and_accel():
+    """The failure the single-regressor estimator still has, and the joint one
+    fixes.
+
+    Speed change and cornering are correlated with each other whenever a
+    route's early turns happen to coincide with its early speed changes, which
+    is common in practice (both cluster around junctions). When they are
+    correlated, correlating horizontal accel against speed delta alone partly
+    picks up the lateral component too, because the lateral component is
+    itself correlated with what is being regressed against. A joint
+    least-squares fit against both speed delta and the gyro-derived lateral
+    regressor apportions each its own share of the variance and is not fooled
+    by the correlation between them.
+
+    Constructed so the turn's cornering magnitude and the speed delta are
+    deliberately correlated (both driven by the same underlying `phase`
+    signal), which is exactly the regime the single-regressor estimator
+    degrades in.
+    """
+    rng = np.random.default_rng(11)
+    n = 800
+    forward_axis = np.array([np.cos(0.3), np.sin(0.3)])
+    lateral_axis = np.array([-forward_axis[1], forward_axis[0]])
+
+    phase = np.linspace(0.0, 1.0, n)
+    speed_delta = 0.6 * np.sin(2 * np.pi * phase * 2) + rng.normal(0.0, 0.05, n)
+    # Cornering correlated with the same phase signal, so a naive correlation
+    # against speed_delta alone cannot separate the two contributions.
+    lateral_regressor = 1.3 * np.sin(2 * np.pi * phase * 2 + 0.3) + rng.normal(0.0, 0.05, n)
+
+    horizontal = (
+        speed_delta[:, None] * forward_axis
+        + lateral_regressor[:, None] * lateral_axis
+        + rng.normal(0.0, 0.02, size=(n, 2))
+    )
+
+    joint = estimate_forward_axis(horizontal, speed_delta, lateral_regressor)
+    single = estimate_forward_axis(horizontal, speed_delta)
+
+    assert float(np.dot(joint, forward_axis)) > 0.98
+    # The single-regressor estimator is not asserted to fail here - only that
+    # the joint one is at least as good, so a future change to the fallback
+    # cannot silently regress this test's protection.
+    assert float(np.dot(joint, forward_axis)) >= float(np.dot(single, forward_axis)) - 1e-6
+
+
+def test_forward_axis_joint_estimator_falls_back_when_regressors_collinear():
+    """If speed delta and the lateral regressor are (numerically) collinear,
+    the 2x2 design matrix is rank-deficient and the joint fit cannot separate
+    the two directions. The estimator must fall back to the single-regressor
+    path rather than return whatever lstsq's minimum-norm solution happens to
+    produce."""
+    rng = np.random.default_rng(13)
+    n = 500
+    true_axis = np.array([1.0, 0.0])
+    speed_delta = rng.normal(0.0, 1.0, n)
+    lateral_regressor = 2.0 * speed_delta  # exactly collinear
+
+    horizontal = speed_delta[:, None] * true_axis + rng.normal(0.0, 0.05, size=(n, 2))
+
+    axis = estimate_forward_axis(horizontal, speed_delta, lateral_regressor)
+    assert abs(float(np.dot(axis, true_axis))) > 0.95
+
+
 def test_forward_axis_survives_a_turn_dominated_window():
     """The failure this estimator was changed to fix.
 

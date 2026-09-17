@@ -127,6 +127,42 @@ def hx_nhc(x: np.ndarray) -> np.ndarray:
     return np.array([-x[VN] * np.sin(x[PSI]) + x[VE] * np.cos(x[PSI])])
 
 
+def hx_heading(x: np.ndarray) -> np.ndarray:
+    """Direct heading measurement, for GNSS course over ground.
+
+    Not one of MIP Section 5.3's original sources, and not needed by the
+    offline benchmark, which is why it did not exist until the phone rig
+    did. The reason it is needed on real hardware:
+
+    `fx` recomputes velocity every cycle as `speed * [cos(psi),
+    sin(psi)]`. Velocity direction is therefore a *function* of psi, not
+    an independent quantity. A measurement that corrects (vn, ve)
+    without also moving psi is undone by the very next prediction step.
+    Since nothing else in Section 5.3 observes psi at all, psi is seeded
+    once and then propagated open-loop by the gyro forever.
+
+    The offline chain hides this completely. `to_route` interpolates
+    1 Hz GNSS onto the 100 Hz grid, so the filter receives a hundred
+    position updates a second, and a dense position stream constrains
+    heading implicitly: you cannot be moving the wrong way for long when
+    your position is corrected every 10 ms. A phone gets one fix a
+    second, the constraint is a hundred times weaker, and the heading
+    error it was masking becomes visible immediately. Measured on the
+    synthetic session replayed at a true 1 Hz fix rate: the fused track
+    ended 59 m off with GNSS fully available throughout.
+
+    GNSS course over ground is a real, independent heading observation
+    whenever the vehicle is actually moving. It is noise at a standstill,
+    so the caller gates it on speed rather than this function doing so.
+    """
+    return np.array([x[PSI]])
+
+
+def wrap_to_pi(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
+
+
 def residual_angle_safe(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Default residual (plain subtraction) is fine for every
     measurement this filter uses (positions and velocities, never
@@ -192,6 +228,14 @@ class FusionConfig:
     r_gnss_vel: float = 0.3  # m/s, 1-sigma
     r_channel_a: float = 0.5  # m/s, 1-sigma - Channel A target RMSE (Section 4.2)
     r_channel_b: float = 1.75  # m/s, 1-sigma - mid Section 4.3's 1.5-2.0 m/s target band
+    # GNSS course over ground, 1-sigma in radians. 0.05 rad is about 3
+    # degrees, which is the right order for a consumer GNSS course at
+    # road speed. See hx_heading for why this source exists at all. It
+    # is only applied when the caller passes a heading, and the caller
+    # is responsible for gating that on speed: course at a standstill
+    # is noise, and feeding noise to the one thing that observes psi is
+    # worse than observing psi not at all.
+    r_gnss_heading: float = 0.05
 
     # Trust weighting (Section 5.4).
     channel_a_b_disagreement_factor: float = 1.5
@@ -393,6 +437,7 @@ class DualChannelUkf:
         r_channel_a_override: float | None = None,
         zupt: bool = False,
         r_zupt: float = 0.05,
+        gnss_heading: float | None = None,
     ) -> UkfState:
         """Advance the filter by one cycle. `gnss_pos`/`gnss_vel` are
         None when GNSS is unavailable this cycle (blackout). Road-
@@ -442,6 +487,23 @@ class DualChannelUkf:
                 self.ukf.update(z, R=R, hx=hx_position)
             self._symmetrize_p()
             self._refresh_sigmas()
+
+            # GNSS course over ground as a direct heading measurement. See
+            # hx_heading. The measurement is pre-unwrapped against the
+            # current estimate rather than installing a custom residual
+            # function, which keeps filterpy's default plain-subtraction
+            # residual correct here and everywhere else: adding
+            # wrap(z - psi_hat) to psi_hat gives a z whose plain difference
+            # from psi_hat is already the shortest angular path, including
+            # when psi has run unwrapped past several full turns.
+            if gnss_heading is not None:
+                psi_now = float(self.ukf.x[PSI])
+                z_heading = np.array([psi_now + wrap_to_pi(gnss_heading - psi_now)])
+                self.ukf.update(
+                    z_heading, R=np.array([[c.r_gnss_heading**2]]), hx=hx_heading
+                )
+                self._symmetrize_p()
+                self._refresh_sigmas()
         else:
             self._gnss_r_multiplier(dt, gnss_available=False)
 

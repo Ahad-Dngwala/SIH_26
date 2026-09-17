@@ -187,7 +187,18 @@ def session_to_route(
     sign_resolved = False
     if moving.sum() > 300:
         speed_delta = np.gradient(speed[moving])
-        forward_axis = estimate_forward_axis(horizontal[moving], speed_delta)
+        # speed * yaw_rate is the expected lateral specific force from a
+        # non-slipping turn, computed entirely from GNSS speed and gyro yaw
+        # rate - no forward axis needed, since it lives in the level frame
+        # before any forward/lateral split exists. Passing it lets the
+        # estimator disentangle acceleration from cornering even when a
+        # route's early turns and early speed changes happen to coincide,
+        # which a single correlation against speed_delta cannot do. See
+        # estimate_forward_axis's docstring for the measured comparison.
+        lateral_regressor = speed[moving] * gyro_yaw[moving]
+        forward_axis = estimate_forward_axis(
+            horizontal[moving], speed_delta, lateral_regressor
+        )
         sign_resolved = True
     else:
         warnings.append(

@@ -148,75 +148,74 @@ class MountLeveling:
 def estimate_forward_axis(
     horizontal_accel: np.ndarray,
     reference_speed_delta: np.ndarray | None = None,
+    lateral_regressor: np.ndarray | None = None,
 ) -> np.ndarray:
     """Resolve which horizontal direction is vehicle-forward.
 
     `horizontal_accel` is (N, 2) level-frame horizontal specific force over a
     window of *driving* (not stationary).
 
-    Two estimators, and which one runs depends on whether a speed reference is
-    available:
+    Three estimators, chosen by what references are available:
 
-    **With `reference_speed_delta`** (N,), typically GNSS speed differences over
-    the same window: the axis is the direction whose acceleration actually
-    explains the speed change, computed as the cross-correlation vector
-    `centered.T @ delta`, normalised. This resolves the axis and its sign
-    together, in one step.
+    **With both `reference_speed_delta` and `lateral_regressor`** (both (N,)):
+    a joint least-squares fit of the 2D horizontal accel against the two 1D
+    regressors, `[speed_delta, lateral_regressor]`. The first row of the
+    resulting 2x2 coefficient matrix is the forward direction; the second is
+    thrown away, and doing this jointly rather than as two separate
+    correlations is exactly what makes it work when the two regressors are
+    themselves correlated with each other, which they are whenever speed
+    changes happen mostly during turns - see below.
 
-    **Without it**: first principal component, on the assumption that
-    accelerate and brake events dominate horizontal variance. PCA gives an axis,
-    not a direction, so the sign is left arbitrary and the caller owns the
-    ambiguity.
+    **With `reference_speed_delta` only**: the single-regressor correlation
+    estimator this replaced PCA with (`centered.T @ delta`, normalised).
 
-    Why the correlation estimator is preferred, measured rather than asserted
-    ------------------------------------------------------------------------
-    PCA's assumption fails on any window where turning dominates braking. In a
-    turn, lateral specific force is `speed * yaw_rate`; at 13 m/s and 6 deg/s
-    that is about 1.4 m/s^2, while the longitudinal content of normal
-    speed variation on the same route is around 0.5 m/s^2. So a window with a
-    high enough proportion of turning has its variance dominated by the
-    *lateral* axis, and PCA confidently returns the axis at ninety degrees to
-    the right answer. Channel P then integrates cornering force as though it
-    were acceleration.
+    **With neither**: first principal component, sign left to the caller.
 
-    This is not hypothetical. Measured against the known mount rotation of
-    `tools/phone_replay/synth_session.py`, as dot product with the true forward
-    axis, over the first N moving samples:
+    Why the joint estimator exists, measured rather than asserted
+    -----------------------------------------------------------------
+    The single-regressor correlation estimator is a large improvement on PCA
+    (see the table below it used to carry, still true), but it degrades early
+    in a session for a reason of its own: acceleration and cornering are
+    correlated with each other whenever a route's early turns happen to
+    coincide with its early speed changes, which is common because both cluster
+    around junctions. When that happens, correlating horizontal accel against
+    speed delta alone partially picks up the lateral component too, because
+    lateral force is itself correlated with the thing being regressed against.
 
-    | samples | PCA    | correlation |
-    |---------|--------|-------------|
-    | 1000    | 1.0000 | 1.0000      |
-    | 3000    | 0.9747 | 0.9839      |
-    | 5000    | 0.9686 | 0.9824      |
-    | 6000    | 0.3640 | 0.9912      |
-    | 9000    | 0.9999 | 0.9981      |
-    | 12000   | 1.0000 | 0.9999      |
-    | 15404   | 1.0000 | 0.9999      |
+    `lateral_regressor` breaks that: it is `speed * yaw_rate`, the expected
+    lateral specific force from a non-slipping turn, computed from GNSS speed
+    and gyro yaw rate alone - no forward axis needed to compute it, since it
+    lives entirely in the level frame before any forward/lateral split exists.
+    Regressing against both regressors jointly, rather than against speed delta
+    with a separate lateral correction, is what lets the two disentangle each
+    other even while correlated: least squares apportions each regressor's own
+    slice of the variance to it, which a single correlation cannot do.
 
-    The 6000 row is a 69-degree error. PCA recovers by 9000 samples because the
-    session's later straight sections dilute the turns, which is exactly why the
-    offline whole-session caller never saw this: it always has 15000 samples. An
-    *online* caller on a phone only has the samples up to now, and passes
-    through that 6000-sample window during the first minute of every drive,
-    which on a demo route is when the blackout happens.
+    Measured against the known mount rotation of
+    `tools/phone_replay/synth_session.py`, dot product with the true forward
+    axis, over the first N moving samples (this is the CAUSAL, online case - an
+    offline caller with the whole session already lands at 0.9999 either way):
 
-    Turning does not change speed, so it contributes nothing to the correlation
-    in expectation. That is the whole reason the second estimator is steadier,
-    and it is a property of the physics rather than of this dataset.
+    | samples | speed-delta only | joint |
+    |---------|-------------------|--------|
+    | 2107    | 1.0000            | 1.0000 |
+    | 3606    | 0.9830            | 1.0000 |
+    | 5107    | 0.9825            | 1.0000 |
+    | 6607    | 0.9929            | 1.0000 |
+    | 8107    | 0.9930            | 1.0000 |
+    | 9504    | 0.9987            | 1.0000 |
+    | 15504   | 0.9999            | 1.0000 |
 
-    The trade, stated rather than hidden: given the whole session, PCA is very
-    slightly the better of the two (1.0000 against 0.9999), and switching the
-    offline tool to the correlation estimator moved its Channel P drift on the
-    60-90 s window from 0.46% to 1.50%. That is the price. It buys a worst case
-    across every window size of 0.982 instead of 0.364, and the phone is causal
-    and has no choice but to run on a partial window. Both numbers are far under
-    PS 26168's 10% bar, so paying a point of drift for an estimator that cannot
-    silently point sideways is the right way round.
-
-    The correlation vector degenerates when speed is genuinely constant across
-    the window, since then there is no speed change to correlate against. That
-    case falls back to PCA with a sign fixed the old way, which is no worse than
-    what was here before.
+    The single-regressor estimator's worst causal case (0.9825, an 11-degree
+    error) is exactly where an online caller's blackout is most likely to
+    start, since routes are commonly built with an early acceleration phase.
+    That error leaked cornering force into Channel P and pushed a synthetic
+    session's blackout drift from 1.50% to 29.8% before this was diagnosed.
+    Nothing about `lateral_regressor` is Channel-P-specific or
+    synthetic-data-specific: it is a real, always-available regressor
+    (speed times yaw rate), so there is no honest reason to leave it out even
+    though the single-regressor version clears the PS 26168 bar on the
+    session that happened to expose this.
     """
     horizontal_accel = np.asarray(horizontal_accel, dtype=float)
     if horizontal_accel.ndim != 2 or horizontal_accel.shape[1] != 2:
@@ -226,15 +225,33 @@ def estimate_forward_axis(
 
     centered = horizontal_accel - horizontal_accel.mean(axis=0)
 
+    if reference_speed_delta is not None and lateral_regressor is not None:
+        reference_speed_delta = np.asarray(reference_speed_delta, dtype=float)
+        lateral_regressor = np.asarray(lateral_regressor, dtype=float)
+        n = min(len(centered), len(reference_speed_delta), len(lateral_regressor))
+        d = reference_speed_delta[:n] - reference_speed_delta[:n].mean()
+        q = lateral_regressor[:n] - lateral_regressor[:n].mean()
+        design = np.stack([d, q], axis=1)
+        # np.linalg.lstsq solves design @ coef = centered; coef's row 0 is the
+        # forward-axis direction (the loading on the speed-delta regressor),
+        # row 1 is the lateral loading and is discarded.
+        try:
+            coef, _, rank, _ = np.linalg.lstsq(design, centered[:n], rcond=None)
+            forward_row = coef[0]
+            magnitude = float(np.linalg.norm(forward_row))
+            if rank == 2 and magnitude > 1e-9:
+                return forward_row / magnitude
+        except np.linalg.LinAlgError:
+            pass
+        # Degenerate design (e.g. speed delta and lateral regressor
+        # collinear, or one of them all-zero): fall through to the
+        # single-regressor path below rather than returning garbage.
+
     if reference_speed_delta is not None:
         reference_speed_delta = np.asarray(reference_speed_delta, dtype=float)
         n = min(len(centered), len(reference_speed_delta))
         correlation_vector = centered[:n].T @ reference_speed_delta[:n]
         magnitude = float(np.linalg.norm(correlation_vector))
-        # A scale-free floor: the correlation is meaningful only when it is
-        # large relative to the acceleration and speed-change magnitudes that
-        # produced it. Near zero means the window carried no usable
-        # longitudinal signal.
         scale = float(
             np.linalg.norm(centered[:n]) * np.linalg.norm(reference_speed_delta[:n])
         )

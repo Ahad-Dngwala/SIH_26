@@ -111,125 +111,205 @@ class MountLeveling(val rotation: Array<DoubleArray>, val gravityMagnitude: Doub
 }
 
 /**
- * Resolves which horizontal direction is vehicle-forward.
+ * Resolves which horizontal direction is vehicle-forward, online.
  *
- * Accelerate and brake events dominate horizontal specific force variance and lie
- * along the longitudinal axis, so the first principal component of horizontal accel
- * over a driving window is the longitudinal direction. PCA gives an axis, not a
- * direction, so the sign is fixed by correlating projected acceleration against GNSS
- * speed change over the same window. An unresolved sign makes Channel P integrate
- * backwards, which is worse than not having the channel at all.
+ * The estimator is the one described in the Python reference's
+ * `estimate_forward_axis`: the axis is the direction whose acceleration explains
+ * the GNSS speed change, computed as the cross-correlation vector between centred
+ * horizontal specific force and speed delta. That resolves the axis and its sign
+ * together. An unresolved or flipped sign makes Channel P integrate backwards, which
+ * is worse than not having the channel at all.
  *
- * This accumulates online, unlike the offline Python version which sees the whole
- * session at once. Same estimator, fed incrementally: only samples taken while
- * genuinely moving are admitted, since a stationary stretch carries no longitudinal
- * signal and would only dilute the PCA.
+ * Do not "simplify" this back to a first principal component. PCA was what this used
+ * to be, and it fails on exactly the windows a phone runs in. In a turn, lateral
+ * specific force is speed times yaw rate, several times larger than the longitudinal
+ * content of ordinary speed variation, so a turn-heavy window has its variance
+ * dominated by the lateral axis and PCA returns an axis ninety degrees off. Measured
+ * against a known mount rotation, PCA's worst case across window sizes was a dot
+ * product of 0.364 with the true axis where this estimator's was 0.982. The offline
+ * caller never saw it because a whole session dilutes the turns; an online caller
+ * passes straight through that regime in the first minute of every drive.
+ *
+ * Accumulates running moments rather than storing samples, so memory and per-sample
+ * cost are constant no matter how long the drive, and the estimate uses every moving
+ * sample seen so far rather than an arbitrary recent window.
  */
 class ForwardAxisEstimator(
     private val minSpeedMps: Double = 2.0,
-    private val minSamples: Int = 300,
-    /** Stop admitting after this many samples. At 100 Hz this is 60 s of driving,
-     * which is far more than the axis needs, and it bounds both memory and the cost
-     * of a recompute on a hot path. The offline Python version uses every moving
-     * sample in the session; the axis is a fixed property of the mount, so the two
-     * agree as soon as there is enough accelerate and brake content to see it. */
-    private val maxSamples: Int = 6000
+    private val minSamples: Int = 300
 ) {
-    private val horizontalX = ArrayList<Double>()
-    private val horizontalY = ArrayList<Double>()
-    private val speedDelta = ArrayList<Double>()
+    private companion object {
+        /** Longest gap between fixes whose speed change can still be attributed to
+         * the samples inside it. Comfortably above a 1 Hz cadence with a few dropped
+         * fixes, well below any deliberate blackout. */
+        const val MAX_INTERVAL_S = 3.0
+    }
+
+    // Global running moments over every admitted sample.
+    private var n: Long = 0
+    private var sumX = 0.0
+    private var sumY = 0.0
+    private var sumXX = 0.0
+    private var sumXY = 0.0
+    private var sumYY = 0.0
+    private var sumD = 0.0
+    private var sumXD = 0.0
+    private var sumYD = 0.0
+
+    // Accumulators for the samples since the last GNSS fix. GNSS speed change is
+    // only known once the fix that ends an interval arrives, so samples are held
+    // here and folded in with the delta that actually covers them. Applying each
+    // delta to the samples that follow it instead costs a full second of lag
+    // between an acceleration and the speed change it caused, which decorrelates
+    // the very signal this estimator runs on. Measured: with the lag, the axis
+    // landed 7.4 degrees off the known mount rotation and leaked enough cornering
+    // force into Channel P to push blackout drift to 38%. Without it, under a
+    // degree.
+    private var intervalN: Long = 0
+    private var intervalSumX = 0.0
+    private var intervalSumY = 0.0
+    private var intervalSumXX = 0.0
+    private var intervalSumXY = 0.0
+    private var intervalSumYY = 0.0
 
     var axis: DoubleArray? = null
         private set
     var signResolved: Boolean = false
         private set
 
-    val sampleCount: Int get() = horizontalX.size
+    val sampleCount: Long get() = n
 
-    /** Admit one sample. `speedChange` is the most recent change in GNSS
-     * speed-over-ground, used only to fix the sign. */
-    fun add(horizontal: DoubleArray, speedMps: Double, speedChange: Double) {
+    /** Buffer one sample. Nothing is committed until the interval closes. */
+    fun addSample(horizontal: DoubleArray, speedMps: Double) {
         if (speedMps <= minSpeedMps) return
-        if (horizontalX.size >= maxSamples) return
-        horizontalX.add(horizontal[0])
-        horizontalY.add(horizontal[1])
-        speedDelta.add(speedChange)
+        val x = horizontal[0]
+        val y = horizontal[1]
+        intervalN++
+        intervalSumX += x
+        intervalSumY += y
+        intervalSumXX += x * x
+        intervalSumXY += x * y
+        intervalSumYY += y * y
     }
 
-    fun isSaturated(): Boolean = horizontalX.size >= maxSamples
+    /**
+     * Close the current interval with the GNSS speed change that occurred across it,
+     * folding its buffered samples into the running moments.
+     *
+     * Since the delta is constant across the interval, the per-sample sum of
+     * x_i * d reduces to d times the interval's sum of x, so no sample history is
+     * needed to get the correlation exactly right.
+     *
+     * `intervalSeconds` guards against attributing a long gap's total speed change to
+     * every sample inside it. A blackout produces exactly that gap: no fix reaches
+     * the pipeline for the whole window, and folding thirty seconds of buffered
+     * samples in with a thirty-second speed delta swamps every honest interval before
+     * it. Measured: that single mistake moved the axis from under a degree off the
+     * known mount rotation to thirteen degrees off, and took blackout drift from
+     * 1.6% to 30%. Over-long intervals are discarded, not clamped: there is no
+     * correct weight for them.
+     */
+    fun closeInterval(speedChange: Double, intervalSeconds: Double = 1.0) {
+        if (intervalN == 0L) return
+        if (intervalSeconds > MAX_INTERVAL_S) {
+            discardInterval()
+            return
+        }
+        n += intervalN
+        sumX += intervalSumX
+        sumY += intervalSumY
+        sumXX += intervalSumXX
+        sumXY += intervalSumXY
+        sumYY += intervalSumYY
+        sumD += speedChange * intervalN
+        sumXD += intervalSumX * speedChange
+        sumYD += intervalSumY * speedChange
 
-    fun hasEnough(): Boolean = horizontalX.size >= minSamples
+        discardInterval()
+    }
+
+    /** Throw away the buffered samples without committing them. Called when the
+     * speed reference that would have explained them is unavailable, which is what a
+     * GNSS blackout means. */
+    fun discardInterval() {
+        intervalN = 0
+        intervalSumX = 0.0
+        intervalSumY = 0.0
+        intervalSumXX = 0.0
+        intervalSumXY = 0.0
+        intervalSumYY = 0.0
+    }
+
+    fun hasEnough(): Boolean = n >= minSamples
 
     /**
-     * Compute the axis from everything admitted so far. Returns null if there is not
-     * enough driving yet, which the caller must treat as "Channel P is not ready",
+     * Compute the axis from everything committed so far, or null if there is not
+     * enough driving yet. The caller must treat null as "Channel P is not ready",
      * never as "assume forward is x".
      */
     fun estimate(): DoubleArray? {
-        val n = horizontalX.size
         if (n < 3) return null
 
-        var meanX = 0.0
-        var meanY = 0.0
-        for (i in 0 until n) { meanX += horizontalX[i]; meanY += horizontalY[i] }
-        meanX /= n
-        meanY /= n
+        val count = n.toDouble()
+        val meanX = sumX / count
+        val meanY = sumY / count
 
-        // Covariance of the centered 2D data. Its principal eigenvector is the first
-        // right singular vector the Python reference takes from an SVD; for a 2x2
-        // symmetric matrix the closed form below is exact and avoids pulling in a
-        // decomposition for two numbers.
-        var sxx = 0.0
-        var sxy = 0.0
-        var syy = 0.0
-        for (i in 0 until n) {
-            val dx = horizontalX[i] - meanX
-            val dy = horizontalY[i] - meanY
-            sxx += dx * dx
-            sxy += dx * dy
-            syy += dy * dy
+        // Cross-correlation of centred horizontal accel with speed change. Expanding
+        // sum((x - mx) * d) gives sumXD - mx * sumD, so no sample history is needed.
+        var ax = sumXD - meanX * sumD
+        var ay = sumYD - meanY * sumD
+        var magnitude = sqrt(ax * ax + ay * ay)
+
+        if (magnitude > 1e-9) {
+            ax /= magnitude
+            ay /= magnitude
+            val resolved = doubleArrayOf(ax, ay)
+            axis = resolved
+            signResolved = true
+            return resolved
         }
+
+        // Degenerate: speed was effectively constant across everything seen, so
+        // there is nothing to correlate against. Fall back to the principal axis of
+        // the centred data, with the sign left unresolved, matching the Python
+        // reference's no-reference path.
+        val sxx = sumXX - count * meanX * meanX
+        val sxy = sumXY - count * meanX * meanY
+        val syy = sumYY - count * meanY * meanY
 
         val trace = sxx + syy
         val determinant = sxx * syy - sxy * sxy
         val discriminant = max(0.0, trace * trace / 4.0 - determinant)
         val largest = trace / 2.0 + sqrt(discriminant)
 
-        var ax: Double
-        var ay: Double
         if (abs(sxy) > 1e-12) {
             ax = largest - syy
             ay = sxy
         } else {
-            // Already diagonal: the axis is whichever of the two has more variance.
             if (sxx >= syy) { ax = 1.0; ay = 0.0 } else { ax = 0.0; ay = 1.0 }
         }
-        val norm = sqrt(ax * ax + ay * ay)
-        ax /= norm
-        ay /= norm
+        magnitude = sqrt(ax * ax + ay * ay)
+        if (magnitude < 1e-12) return null
 
-        // Sign: positive projected acceleration must correspond to increasing speed.
-        var correlation = 0.0
-        for (i in 0 until n) {
-            val projected = (horizontalX[i] - meanX) * ax + (horizontalY[i] - meanY) * ay
-            correlation += projected * speedDelta[i]
-        }
-        if (correlation < 0.0) { ax = -ax; ay = -ay }
-
-        val resolved = doubleArrayOf(ax, ay)
+        val resolved = doubleArrayOf(ax / magnitude, ay / magnitude)
         axis = resolved
-        signResolved = abs(correlation) > 0.0
+        signResolved = false
         return resolved
     }
 
     fun reset() {
-        horizontalX.clear()
-        horizontalY.clear()
-        speedDelta.clear()
+        n = 0
+        sumX = 0.0; sumY = 0.0
+        sumXX = 0.0; sumXY = 0.0; sumYY = 0.0
+        sumD = 0.0; sumXD = 0.0; sumYD = 0.0
+        intervalN = 0
+        intervalSumX = 0.0; intervalSumY = 0.0
+        intervalSumXX = 0.0; intervalSumXY = 0.0; intervalSumYY = 0.0
         axis = null
         signResolved = false
     }
 }
+
 
 data class PhysicsSpeedConfig(
     /** The 1-sigma this channel is handed to the UKF as. Override with a measured

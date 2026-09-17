@@ -62,6 +62,12 @@ data class FusionConfig(
     val rGnssVel: Double = 0.3,
     val rChannelA: Double = 0.5,
     val rChannelB: Double = 1.75,
+    /** GNSS course over ground, 1-sigma in radians. About 3 degrees, the right order
+     * for a consumer GNSS course at road speed. See hxHeading for why this source
+     * exists. Only applied when the caller supplies a heading, and the caller gates
+     * that on speed: course at a standstill is noise, and feeding noise to the one
+     * thing that observes psi is worse than not observing psi at all. */
+    val rGnssHeading: Double = 0.05,
 
     val channelAbDisagreementFactor: Double = 1.5,
     val channelAInflatedRMultiplier: Double = 5.0,
@@ -116,6 +122,24 @@ private fun hxPosition(x: DoubleArray) = doubleArrayOf(x[PN], x[PE])
 private fun hxPositionVelocity(x: DoubleArray) = doubleArrayOf(x[PN], x[PE], x[VN], x[VE])
 
 private fun hxVelocity(x: DoubleArray) = doubleArrayOf(x[VN], x[VE])
+
+/**
+ * Direct heading measurement, for GNSS course over ground.
+ *
+ * Why this exists when MIP Section 5.3 has no such source: fx recomputes velocity
+ * every cycle as speed * [cos(psi), sin(psi)], so velocity direction is a function of
+ * psi rather than an independent quantity. A measurement that corrects (vn, ve)
+ * without also moving psi is undone by the very next prediction step, and nothing
+ * else in the filter observes psi, so psi is seeded once and then propagated
+ * open-loop by the gyro forever.
+ *
+ * The offline chain hides this: it interpolates 1 Hz GNSS onto a 100 Hz grid, so its
+ * filter gets a hundred position updates a second and heading is constrained
+ * implicitly. A phone gets one fix a second. Measured on the synthetic session
+ * replayed at a true 1 Hz fix rate, without this source, the fused track ended 59 m
+ * off with GNSS available throughout.
+ */
+private fun hxHeading(x: DoubleArray) = doubleArrayOf(x[PSI])
 
 /** Non-holonomic constraint: body-frame lateral velocity should be near zero. */
 private fun hxNhc(x: DoubleArray) =
@@ -368,7 +392,8 @@ class DualChannelUkf(initialState: UkfState, val config: FusionConfig = FusionCo
         roadSignatureConfidence: Double = 0.0,
         rChannelAOverride: Double? = null,
         zupt: Boolean = false,
-        rZupt: Double = 0.05
+        rZupt: Double = 0.05,
+        gnssHeading: Double? = null
     ): UkfState {
         val blackout = gnssPos == null
 
@@ -394,6 +419,19 @@ class DualChannelUkf(initialState: UkfState, val config: FusionConfig = FusionCo
             }
             symmetrizeP()
             refreshSigmas()
+
+            // GNSS course over ground as a direct heading measurement. The
+            // measurement is pre-unwrapped against the current estimate rather than
+            // installing a custom residual function, so the plain-subtraction
+            // residual used everywhere else stays correct here too, including when
+            // psi has run unwrapped past several full turns.
+            if (gnssHeading != null) {
+                val psiNow = x[PSI]
+                val z = doubleArrayOf(psiNow + wrapToPi(gnssHeading - psiNow))
+                update(z, LinAlg.diag(doubleArrayOf(config.rGnssHeading * config.rGnssHeading)), ::hxHeading)
+                symmetrizeP()
+                refreshSigmas()
+            }
         } else {
             gnssRMultiplier(dt, gnssAvailable = false)
         }

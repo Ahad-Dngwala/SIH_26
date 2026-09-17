@@ -56,6 +56,11 @@ fun main(args: Array<String>) {
     var worstErrorM = 0.0
     var sumSquaredErrorM = 0.0
     var errorSamples = 0
+    val traceFile = if (args.size > 3) File(args[3]) else null
+    val trace = StringBuilder()
+    if (traceFile != null) trace.append("t,fused_n,fused_e,truth_n,truth_e,speed,heading,blackout,channel_p\n")
+    var nextTraceT = 0.0
+
     var imuCount = 0
     var gnssCount = 0
     var withheldCount = 0
@@ -87,6 +92,15 @@ fun main(args: Array<String>) {
                 )
                 if (snapshot != null) {
                     lastSnapshot = snapshot
+                    if (traceFile != null && snapshot.tSeconds >= nextTraceT) {
+                        nextTraceT = snapshot.tSeconds + 0.5
+                        trace.append(
+                            "${snapshot.tSeconds},${snapshot.fusedNorth},${snapshot.fusedEast}," +
+                                "${snapshot.lastTruthNorth},${snapshot.lastTruthEast}," +
+                                "${snapshot.speedMps},${snapshot.headingDeg}," +
+                                "${if (snapshot.blackout) 1 else 0},${snapshot.channelPSpeed}\n"
+                        )
+                    }
                     if (snapshot.blackout) {
                         val error = snapshot.driftMeters
                         if (error > worstErrorM) worstErrorM = error
@@ -150,4 +164,5 @@ fun main(args: Array<String>) {
     println("channel_p_speed_mps=${pipeline.channelPSpeedMps}")
     println("mean_step_latency_ms=${end.stepLatencyMs}")
     println("imu_rate_hz=${end.imuRateHz}")
+    traceFile?.writeText(trace.toString())
 }
