@@ -61,5 +61,34 @@ so the diff is reviewable as a behaviour change rather than buried.
 
 ```
 python -m tools.parity.generate_fixture   # regenerate (deliberately, see above)
-python -m tools.parity.verify_fixture     # replay and check
+python -m tools.parity.verify_fixture     # replay and check (Python reference)
+tools/parity/run_kotlin_parity.sh         # replay and check (Kotlin port)
 ```
+
+## The Kotlin port
+
+`android_app/app/src/main/java/org/sih26/deadreckoning/fusion/` is checked by
+`run_kotlin_parity.sh`, which compiles the fusion core with `kotlinc`, replays
+all 600 cycles and exits non-zero on divergence. Measured on the committed
+fixture:
+
+| quantity | worst divergence | tolerance |
+|---|---|---|
+| position | 5.4e-12 m | 0.5 m |
+| velocity | 3.5e-13 m/s | 0.1 m/s |
+| heading | 2.5e-14 rad | 0.01 rad |
+
+That is floating-point round-off over 600 cycles, not agreement within
+tolerance. The tolerances exist to absorb platform math differences; the port
+does not need them, and if a change ever starts consuming them, that is a
+signal worth chasing rather than a pass.
+
+The gate deliberately avoids Gradle. It needs `kotlinc`, a JVM and Python, so it
+runs in seconds on any machine without the Android SDK. Run it before and after
+touching any filter code in either language.
+
+`export_fixture_csv.py` flattens the JSON into a CSV the harness reads, because
+hand-rolling a JSON parser in Kotlin would add a second thing that can be subtly
+wrong to a tool whose job is catching things that are subtly wrong. The CSV is
+generated into a temporary directory at run time and never committed; the JSON
+remains the single source of truth.
