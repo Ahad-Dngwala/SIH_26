@@ -5,6 +5,39 @@ This document is the single source of truth for building the system end to end. 
 
 If you are a Claude instance picking up one task from this plan: find your task in Section 12, then read the matching detailed section earlier in the document (do not skip straight to Section 12, the contracts and specs live in the earlier sections).
 
+## Current implementation direction (2026-09-18)
+
+This status update takes precedence over older Android/JNI/ML deployment language in
+this plan. It records the implementation that is present in the repository, not a
+new proposal:
+
+- The production phone path is Kotlin-first: the 7-state UKF, mount leveling,
+  forward-axis estimator, physics speed channel (Channel P), GNSS course heading,
+  and blackout gate live in `android_app/app/.../fusion/`. There is no JNI, NDK, or
+  C++ dependency in the Android demo. The Python implementation remains the
+  numerical reference.
+- The immediate deliverable is a real measurement rig, not an unvalidated ML UI:
+  raw accelerometer, gyroscope, magnetometer, and `LocationManager.GPS_PROVIDER`
+  records are written as JSONL compatible with `tools/phone_replay/session.py`.
+  A software blackout withholds GNSS only from the filter; it never stops logging
+  truth fixes. The first priority is a real recording that can be replayed offline.
+- Raw Android sensors only: no virtual/fused sensor and no
+  `FusedLocationProviderClient`. IMU timing comes from `SensorEvent.timestamp`,
+  callbacks run on a dedicated handler thread at a requested 100 Hz, and recording
+  runs in a foreground service.
+- Channel P is the active velocity evidence. The trained Channel A was rejected;
+  ONNX, Room, calibration UX, MapLibre, the C++ port, and live HMM/Viterbi matching
+  are deferred. ZUPT is off by default until a real recording validates it; NHC is a
+  runtime experiment, not a hardcoded default.
+- The correctness gates are `tools/parity/run_kotlin_parity.sh` (UKF math) and
+  `python -m tools.phone_replay.check_kotlin_frontend` (phone front end). Run both
+  after any Python-reference or Kotlin-fusion change. Android API integration still
+  requires a Gradle build and, ultimately, physical-device validation.
+
+The historical sections below remain useful for the broader proposed system, but
+their implementation details must not be used to resurrect deferred components in
+the active demo without an explicit decision.
+
 ---
 
 ## 0. System Summary (read this first)

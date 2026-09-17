@@ -18,17 +18,19 @@ A Gradle project now exists: `settings.gradle.kts`, root `build.gradle.kts`,
    `sensors/SessionLogger.kt`.
 4. UKF port, validated against the parity fixture - `fusion/Ukf.kt`, see
    `tools/parity/README.md`.
-5. **Not yet driven.** No real recording exists.
-6. Blackout toggle with live drift readout - `MainActivity.kt`'s Compose UI plus
+5. Blackout toggle with live drift readout - `MainActivity.kt`'s Compose UI plus
    `SessionRecordingService.ACTION_SET_BLACKOUT`.
-7. Minimal UI - present, deliberately plain per the handoff (mode, speed, heading,
+6. Minimal UI - present, deliberately plain per the handoff (mode, speed, heading,
    blackout elapsed/distance/drift, IMU rate, step latency).
+7. **Not yet driven.** No real recording exists; physical-device logging is the
+   next acceptance gate.
 
-**This container has no Android SDK, so nothing here has been built with Gradle or
-run on a device or emulator.** Every line in `fusion/` has been separately compiled
-with plain `kotlinc` (no Android dependencies in that package by design - see
-`fusion/LinAlg.kt`'s module docs) and is exercised by two correctness gates that do
-not need the SDK:
+The Kotlin 2.0 build applies `org.jetbrains.kotlin.plugin.compose`, rather than the
+older standalone Compose compiler extension, so its compiler version stays aligned
+with Kotlin. **An Android SDK, Java, Gradle wrapper, and Kotlin CLI are not available
+in this environment, so the app has not been built with Gradle or run on a device or
+emulator here.** The Android-free `fusion/` package is exercised by two correctness
+gates that do not need the SDK:
 
 - `tools/parity/run_kotlin_parity.sh` - the filter math against the Python
   reference's own fixture.
@@ -52,5 +54,6 @@ known gaps to expect on that first sync:
   numbers are not load-bearing, only the min SDK (26) and the fact that `fusion/` has
   no Android imports are.
 
-- [`app/`](app/README.md) - the Kotlin/Compose application (Section 7.2-7.4).
-- [`native/`](native/README.md) - NDK/C++ bridge to `fusion_core/cpp/` (Section 7.1, 7.3 step 6).
+- [`app/`](app/README.md) - the Kotlin/Compose application.
+- [`native/`](native/README.md) - historical JNI/NDK notes; not part of the active
+  Kotlin-first phone demo.

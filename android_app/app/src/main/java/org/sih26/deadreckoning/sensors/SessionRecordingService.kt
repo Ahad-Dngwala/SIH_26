@@ -109,14 +109,16 @@ class SessionRecordingService : Service() {
                 }
                 Sensor.TYPE_ACCELEROMETER -> {
                     lastAccel = event.values.copyOf()
-                    lastAccelTimestampNs = event.timestamp
+                    // Emit on the accel clock only. Calling this after a gyro event
+                    // logged the same accel sample twice (with a stale timestamp),
+                    // roughly doubling the record rate and corrupting dt.
+                    maybeEmitImuSample(event.timestamp)
                 }
                 Sensor.TYPE_GYROSCOPE -> {
                     lastGyro = event.values.copyOf()
                 }
                 else -> return
             }
-            maybeEmitImuSample(event.timestamp)
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
@@ -129,7 +131,6 @@ class SessionRecordingService : Service() {
     // (accel, gyro) pair and avoids either stream blocking on the other.
     private var lastAccel: FloatArray? = null
     private var lastGyro: FloatArray? = null
-    private var lastAccelTimestampNs: Long = 0L
 
     private fun maybeEmitImuSample(timestampNs: Long) {
         val accel = lastAccel ?: return
@@ -152,7 +153,7 @@ class SessionRecordingService : Service() {
         )
         if (snapshot != null) {
             logger?.logFused(snapshot.tSeconds, snapshot.fusedNorth, snapshot.fusedEast)
-            snapshotListener?.invoke(snapshot)
+            publishSnapshot(snapshot)
         }
     }
 
@@ -186,7 +187,7 @@ class SessionRecordingService : Service() {
                 )
             )
 
-            statusListener?.invoke(pipeline?.describeFrontEnd() ?: "")
+            publishStatus(pipeline?.describeFrontEnd() ?: "")
         }
 
         @Deprecated("Deprecated in API 29, still required on API 26 targets")
@@ -213,17 +214,52 @@ class SessionRecordingService : Service() {
             ACTION_STOP -> stopRecording()
             ACTION_SET_BLACKOUT -> {
                 val active = intent.getBooleanExtra(EXTRA_BLACKOUT_ACTIVE, false)
-                blackoutActive = active
-                pipeline?.setBlackout(active, System.nanoTime())
+                // FusionPipeline is owned by the sensor handler thread. Move this
+                // control event there too; otherwise a UI toggle can race an IMU
+                // callback halfway through a filter step.
+                handler.post {
+                    blackoutActive = active
+                    // Fusion timestamps use Android's elapsedRealtime clock. Java's
+                    // nanoTime has no API guarantee of sharing that epoch,
+                    // especially across suspend, so it must not be mixed into
+                    // blackout accounting.
+                    pipeline?.setBlackout(active, android.os.SystemClock.elapsedRealtimeNanos())
+                }
             }
         }
         return START_STICKY
     }
 
     private fun startRecording() {
+        // A repeat START intent must not create a second logger or re-register the
+        // same listener. The UI normally prevents this; the service remains robust
+        // to duplicate intents after process recreation.
+        if (pipeline != null) return
+
+        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            publishStatus("ERROR: location permission not granted")
+            stopSelf()
+            return
+        }
+
+        val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        if (accelerometer == null || gyroscope == null) {
+            publishStatus("ERROR: device is missing accelerometer or gyroscope")
+            stopSelf()
+            return
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification())
 
         sessionStartElapsedNs = android.os.SystemClock.elapsedRealtimeNanos()
+        lastAccel = null
+        lastGyro = null
+        latestMagnetometer = null
+        blackoutActive = false
         pipeline = FusionPipeline()
 
         val outDir = File(getExternalFilesDir(null), "sessions")
@@ -234,22 +270,6 @@ class SessionRecordingService : Service() {
             device = android.os.Build.MODEL ?: "unknown",
             notes = "recorded by SessionRecordingService"
         )
-
-        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            statusListener?.invoke("ERROR: location permission not granted")
-            return
-        }
-
-        val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
-
-        if (accelerometer == null || gyroscope == null) {
-            statusListener?.invoke("ERROR: device is missing accelerometer or gyroscope")
-            return
-        }
 
         sensorManager.registerListener(sensorListener, accelerometer, SAMPLING_PERIOD_US, handler)
         sensorManager.registerListener(sensorListener, gyroscope, SAMPLING_PERIOD_US, handler)
@@ -285,6 +305,16 @@ class SessionRecordingService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Compose state may only change on its owning main thread. Sensor and GNSS
+     * callbacks intentionally run on [thread], so cross the boundary exactly here. */
+    private fun publishStatus(status: String) {
+        Handler(Looper.getMainLooper()).post { statusListener?.invoke(status) }
+    }
+
+    private fun publishSnapshot(snapshot: FusionSnapshot?) {
+        Handler(Looper.getMainLooper()).post { snapshotListener?.invoke(snapshot) }
+    }
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(

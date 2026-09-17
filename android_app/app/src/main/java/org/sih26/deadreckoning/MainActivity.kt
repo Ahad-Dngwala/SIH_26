@@ -18,6 +18,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,7 +64,12 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     RecordingScreen(
-                        onStart = { startService(serviceIntent(SessionRecordingService.ACTION_START)) },
+                        onStart = {
+                            ContextCompat.startForegroundService(
+                                this,
+                                serviceIntent(SessionRecordingService.ACTION_START)
+                            )
+                        },
                         onStop = { startService(serviceIntent(SessionRecordingService.ACTION_STOP)) },
                         onBlackoutToggle = { active ->
                             val intent = serviceIntent(SessionRecordingService.ACTION_SET_BLACKOUT)
@@ -91,12 +97,17 @@ private fun RecordingScreen(
     var snapshot by remember { mutableStateOf<FusionSnapshot?>(null) }
     var status by remember { mutableStateOf("") }
 
-    // Plain callback wiring rather than a Flow/StateFlow round-trip: the service is
-    // a singleton for the app's lifetime and this screen is the only observer, so a
-    // static listener is the simplest correct thing rather than infrastructure this
-    // demo does not need yet.
-    SessionRecordingService.snapshotListener = { snapshot = it }
-    SessionRecordingService.statusListener = { status = it }
+    // The service posts both callbacks to the main Looper. Installing and removing
+    // them as a Compose effect prevents a stale Activity from being retained after
+    // rotation or navigation.
+    DisposableEffect(Unit) {
+        SessionRecordingService.snapshotListener = { snapshot = it }
+        SessionRecordingService.statusListener = { status = it }
+        onDispose {
+            SessionRecordingService.snapshotListener = null
+            SessionRecordingService.statusListener = null
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),

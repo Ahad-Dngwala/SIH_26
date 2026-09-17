@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -36,10 +37,6 @@ android {
     buildFeatures {
         compose = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
-
     // fusion/*.kt is deliberately Android-free (see its own file docs) so it can be
     // unit-tested on a desktop JVM via tools/parity/ and tools/phone_replay/ without
     // an emulator. Nothing here needs to change that; Gradle just compiles it as
