@@ -23,9 +23,23 @@ the benchmark replay tool is Section 9 (Section 8 is the Edge Engine).
 Worth fixing in the MIP itself so it doesn't send someone looking in
 the wrong place.
 
-Sigma point parameters to start from (Section 5.5 step 3): alpha =
-1e-3, beta = 2, kappa = 0 - tune alpha toward 1e-4 first if the filter
-is numerically unstable (Section 14).
+Sigma point parameters (Section 5.5 step 3 suggests alpha = 1e-3, beta
+= 2, kappa = 0). **This prototype uses alpha = 1.0, not 1e-3, and
+Section 5.5's accompanying advice to "tune alpha toward 1e-4 first if
+the filter is numerically unstable" is backwards - moving alpha *down*
+is what causes the instability.** At alpha = 1e-3 the zeroth covariance
+weight is about -1e6 while the sigma points are squeezed to ~0.26% of a
+standard deviation, so floating-point cancellation in `fx`'s nonlinear
+speed re-projection gets amplified by six orders of magnitude every
+cycle. With Channel A and Channel B both supplying velocity updates
+this stayed hidden, because those updates injected enough information
+to pull `P` back down each cycle. With no velocity channel - the
+configuration this repo is actually in - `P` reaches ~1e24 and goes
+indefinite about 60 s into a blackout, at the instant GNSS reacquires.
+Measured: alpha in {1e-3, 1e-2, 0.1} all fail, 0.3 survives with max
+diag(P) ~2e16, 1.0 stays at ~6e4. See `FusionConfig.alpha`'s comment.
+The change moves the dummy-channel benchmark number by 0.003 pp
+(1.486% -> 1.483%), so nothing previously reported depended on it.
 
 Status: **first working version built (`ukf.py`)**, using filterpy's
 `UnscentedKalmanFilter` with a custom CTCV `fx` and four separate `hx`

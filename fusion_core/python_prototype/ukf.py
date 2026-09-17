@@ -71,6 +71,11 @@ N_STATES = 7
 # Indices into the state vector, named for readability at call sites.
 PN, PE, VN, VE, PSI, BA, BG = range(N_STATES)
 
+# Smallest eigenvalue `_symmetrize_p` will let P hold. Small enough to
+# be far below any physically meaningful variance in this state vector,
+# large enough that Cholesky never sees a negative.
+_MIN_EIGENVALUE = 1e-9
+
 
 def fx(x: np.ndarray, dt: float, gyro_yaw: float) -> np.ndarray:
     """Process model (Section 5.2): CTCV kinematic propagation.
@@ -137,7 +142,36 @@ class FusionConfig:
     """Tunable parameters, defaults per Section 5.5 step 3 / Section
     5.4 / Section 5.5 step 5."""
 
-    alpha: float = 1e-3
+    # Sigma-point scaling. MIP Section 5.5 step 3 suggests alpha=1e-3,
+    # and this filter shipped with that value, but it is wrong for this
+    # `fx` and it was only ever held together by the velocity channels.
+    #
+    # With alpha=1e-3 the Merwe scaling gives lambda = alpha^2*n - n
+    # ~= -7, so the zeroth covariance weight Wc[0] = lambda/(n+lambda)
+    # + (1 - alpha^2 + beta) is about -1e6. The sigma points are
+    # simultaneously squeezed to ~0.26% of a standard deviation, so
+    # `fx`'s nonlinear terms (speed = hypot(vn, ve), then re-projection
+    # onto the new heading) are evaluated at nearly identical points
+    # and differenced - catastrophic cancellation - and the result is
+    # then multiplied by ~-1e6. That is an exponential amplifier on
+    # floating-point noise.
+    #
+    # It never showed up because every cycle also applied a Channel A
+    # and a Channel B velocity update, which injected enough real
+    # information to drag P back down before the amplifier ran away.
+    # Remove those updates - i.e. run the honest "no trained velocity
+    # channel" configuration this repo is actually in - and P reaches
+    # ~1e24 and goes indefinite at the moment GNSS reacquires, roughly
+    # 60 s into a blackout. Measured, not theorised: alpha=1e-3 and
+    # 1e-2 both fail, 0.1 fails, 0.3 survives with max diag(P) ~2e16,
+    # 1.0 stays at ~6e4.
+    #
+    # alpha=1.0 with kappa=0 gives lambda=0, Wc[0]=beta=2, and a sigma
+    # spread of sqrt(n*P) - the standard, numerically benign choice.
+    # Note that `python_prototype/README.md` previously advised tuning
+    # alpha *toward 1e-4* if the filter was unstable; that advice is
+    # backwards and has been corrected there.
+    alpha: float = 1.0
     beta: float = 2.0
     kappa: float = 0.0
 
@@ -248,8 +282,16 @@ class DualChannelUkf:
 
     # -- trust weighting (Section 5.4) -------------------------------------------
 
-    def _channel_a_r(self, channel_a_speed: float, channel_b_speed: float) -> float:
+    def _channel_a_r(
+        self, channel_a_speed: float, channel_b_speed: float | None
+    ) -> float:
         c = self.config
+        if channel_b_speed is None:
+            # Nothing to cross-check against. Section 5.4's rule is a
+            # *disagreement* detector; with one channel there is no
+            # disagreement to detect, so A keeps its nominal R rather
+            # than being inflated or deflated on no evidence.
+            return c.r_channel_a
         disagreement = abs(channel_a_speed - channel_b_speed)
         if disagreement > c.channel_a_b_disagreement_factor * c.r_channel_b:
             return c.r_channel_a * c.channel_a_inflated_r_multiplier
@@ -292,12 +334,30 @@ class DualChannelUkf:
         variances (e.g. `ve` on a perfectly straight synthetic route)
         collapsing toward zero until Cholesky sees a tiny negative
         eigenvalue that is numerically indefinite even though it is
-        conceptually zero. Symmetrizing fixes the first; a small
-        diagonal jitter fixes the second without materially changing
-        the filter's behavior anywhere P isn't already near-singular.
+        conceptually zero.
+
+        Symmetrizing fixes the first. For the second, this used to add
+        a flat 1e-9 to the diagonal, which does not actually guarantee
+        positive-definiteness - it only helps when the offending
+        eigenvalue happens to be smaller than the jitter. Flooring the
+        eigenvalues directly does guarantee it, for the same cost on a
+        7x7. It is a floor, not a clamp: healthy eigenvalues are
+        untouched, so this changes nothing anywhere P is already well
+        conditioned.
+
+        This is insurance, not the fix for the blow-up described in
+        `FusionConfig.alpha` - flooring alone was measured and does
+        *not* stop that one, because there the growth is genuine
+        dynamics of a badly scaled unscented transform rather than a
+        near-singular P. Keep both.
         """
         p = (self.ukf.P + self.ukf.P.T) / 2.0
-        self.ukf.P = p + np.eye(N_STATES) * 1e-9
+        eigenvalues, eigenvectors = np.linalg.eigh(p)
+        floored = np.clip(eigenvalues, _MIN_EIGENVALUE, None)
+        if np.array_equal(floored, eigenvalues):
+            self.ukf.P = p
+            return
+        self.ukf.P = eigenvectors @ np.diag(floored) @ eigenvectors.T
 
     def _refresh_sigmas(self) -> None:
         """filterpy's `UnscentedKalmanFilter.update()` reuses
@@ -324,17 +384,35 @@ class DualChannelUkf:
         self,
         dt: float,
         gyro_yaw: float,
-        channel_a_speed: float,
-        channel_b_speed: float,
+        channel_a_speed: float | None,
+        channel_b_speed: float | None,
         gnss_pos: np.ndarray | None,
         gnss_vel: np.ndarray | None,
         road_signature_pos: np.ndarray | None,
         road_signature_confidence: float,
+        r_channel_a_override: float | None = None,
     ) -> UkfState:
         """Advance the filter by one cycle. `gnss_pos`/`gnss_vel` are
         None when GNSS is unavailable this cycle (blackout). Road-
         signature args are None/0.0 when no segment match is offered
-        this cycle."""
+        this cycle.
+
+        `channel_a_speed`/`channel_b_speed` may be None, in which case
+        that channel's update is skipped entirely for this cycle. This
+        is not an error path - it is the honest configuration of this
+        repo today, where neither channel has a usable trained model
+        (see models/README.md). With both None the filter has no
+        velocity evidence during a blackout and coasts on the CTCV
+        process model alone, which is precisely the "what the phone
+        does today" baseline every drift number should be compared
+        against.
+
+        `r_channel_a_override` lets a caller supply a per-cycle 1-sigma
+        for whatever is occupying Channel A's slot - notably
+        `physics_speed.PhysicsSpeedChannel`, whose measured R is
+        nothing like `FusionConfig.r_channel_a`'s Section 4.2 target.
+        It bypasses the Section 5.4 disagreement rule, since that rule
+        is calibrated for Channel A specifically."""
         c = self.config
         blackout = gnss_pos is None
 
@@ -364,20 +442,26 @@ class DualChannelUkf:
         # estimate (Section 5.3 point 2/3), then apply as velocity
         # pseudo-measurements.
         psi_hat = self.ukf.x[PSI]
-        r_channel_a = self._channel_a_r(channel_a_speed, channel_b_speed)
 
-        z_a = np.array(
-            [channel_a_speed * np.cos(psi_hat), channel_a_speed * np.sin(psi_hat)]
-        )
-        self.ukf.update(z_a, R=np.eye(2) * r_channel_a**2, hx=hx_velocity)
-        self._symmetrize_p()
-        self._refresh_sigmas()
+        if channel_a_speed is not None:
+            if r_channel_a_override is not None:
+                r_channel_a = r_channel_a_override
+            else:
+                r_channel_a = self._channel_a_r(channel_a_speed, channel_b_speed)
 
-        z_b = np.array(
-            [channel_b_speed * np.cos(psi_hat), channel_b_speed * np.sin(psi_hat)]
-        )
-        self.ukf.update(z_b, R=np.eye(2) * c.r_channel_b**2, hx=hx_velocity)
-        self._symmetrize_p()
+            z_a = np.array(
+                [channel_a_speed * np.cos(psi_hat), channel_a_speed * np.sin(psi_hat)]
+            )
+            self.ukf.update(z_a, R=np.eye(2) * r_channel_a**2, hx=hx_velocity)
+            self._symmetrize_p()
+            self._refresh_sigmas()
+
+        if channel_b_speed is not None:
+            z_b = np.array(
+                [channel_b_speed * np.cos(psi_hat), channel_b_speed * np.sin(psi_hat)]
+            )
+            self.ukf.update(z_b, R=np.eye(2) * c.r_channel_b**2, hx=hx_velocity)
+            self._symmetrize_p()
 
         # Non-holonomic constraint - see hx_nhc's and
         # FusionConfig.enable_nhc's docstrings (off by default;

@@ -207,3 +207,82 @@ def test_nhc_disabled_by_default():
     come with a fresh ablation re-run (see this file's git history for
     the numbers) and a docstring update, not a silent flip."""
     assert FusionConfig().enable_nhc is False
+
+
+def test_filter_survives_blackout_with_no_velocity_channel():
+    """Regression guard for the alpha=1e-3 covariance blow-up.
+
+    With both velocity channels absent - which is this repo's actual
+    configuration, since neither Channel A nor Channel B has a usable
+    trained model - a long blackout leaves the filter with no velocity
+    evidence at all. That is the "what the phone does today" baseline
+    and it must be *runnable*, not just conceptually available: it
+    previously raised LinAlgError from Cholesky the moment GNSS
+    reacquired, after P had grown to ~1e24.
+
+    Asserts the run completes, P stays positive-definite throughout,
+    and the covariance stays within a sane order of magnitude.
+    """
+    t, pos, vel, heading, gyro_yaw_true = _synthetic_truth(
+        "constant_turn", duration_s=120.0, dt_s=0.1, speed_mps=16.7, turn_rate_dps=3.0
+    )
+    rng = np.random.default_rng(0)
+    dt = float(t[1] - t[0])
+    ukf = DualChannelUkf(
+        UkfState(pos=pos[0].copy(), vel=vel[0].copy(), heading=float(heading[0])),
+        FusionConfig(),
+    )
+
+    for i in range(1, len(t)):
+        blackout = 40.0 <= t[i] < 100.0
+        gnss_pos = None if blackout else pos[i] + rng.normal(0.0, 0.5, size=2)
+        ukf.step(
+            dt=dt,
+            gyro_yaw=gyro_yaw_true[i - 1] + rng.normal(0.0, 0.005),
+            channel_a_speed=None,
+            channel_b_speed=None,
+            gnss_pos=gnss_pos,
+            gnss_vel=None,
+            road_signature_pos=None,
+            road_signature_confidence=0.0,
+        )
+        eigenvalues = np.linalg.eigvalsh(ukf.ukf.P)
+        assert eigenvalues.min() > 0.0, f"P went indefinite at t={t[i]:.1f}s"
+
+    assert np.max(np.diag(ukf.ukf.P)) < 1e8, (
+        "covariance grew beyond any physically sensible value during a "
+        f"blackout with no velocity channel: max diag(P) = "
+        f"{np.max(np.diag(ukf.ukf.P)):.2e}"
+    )
+
+
+def test_absent_channel_is_not_the_same_as_zero_speed():
+    """`None` must mean "skip this update", never "measured 0 m/s" -
+    conflating them would apply a hard brake to the filter on every
+    cycle a channel has nothing to say."""
+    t, pos, vel, heading, gyro_yaw_true = _synthetic_truth(
+        "straight", duration_s=10.0, dt_s=0.1, speed_mps=16.7
+    )
+    dt = float(t[1] - t[0])
+
+    def run(channel_speed):
+        ukf = DualChannelUkf(
+            UkfState(pos=pos[0].copy(), vel=vel[0].copy(), heading=float(heading[0])),
+            FusionConfig(),
+        )
+        state = None
+        for i in range(1, len(t)):
+            state = ukf.step(
+                dt=dt,
+                gyro_yaw=gyro_yaw_true[i - 1],
+                channel_a_speed=channel_speed,
+                channel_b_speed=None,
+                gnss_pos=None,
+                gnss_vel=None,
+                road_signature_pos=None,
+                road_signature_confidence=0.0,
+            )
+        return float(np.linalg.norm(state.vel))
+
+    assert run(None) > 15.5, "absent channel should leave the coast speed alone"
+    assert run(0.0) < 5.0, "a genuine 0 m/s measurement should brake the filter"
