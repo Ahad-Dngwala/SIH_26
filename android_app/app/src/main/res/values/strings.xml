@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SIH Dead Reckoning</string>
+    <string name="notification_channel_name">Recording drive</string>
+    <string name="notification_text">Logging IMU + GNSS for a real-road drift measurement</string>
+</resources>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- LocationManager.GPS_PROVIDER, never FusedLocationProviderClient - see
+         SessionRecordingService's docs for why that distinction is load-bearing. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Foreground service so sensor delivery survives the screen turning off
+         during a test drive. Android 14 (API 34) requires a declared type; this one
+         is a location-tracking service by nature even though it also reads raw IMU,
+         because "location" is the closest official type to "outdoor recording" and
+         gives the OS the truthful signal for battery/background restrictions. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Raw accelerometer, gyroscope and magnetometer. No android.hardware.sensor.*
+         <uses-feature> requirement is declared: a device missing one of these can
+         still install the app and get a clear in-app error, rather than being
+         silently excluded from the Play listing on a hackathon demo device that
+         might be borrowed. -->
+
+    <application
+        android:name=".DeadReckoningApp"
+        android:allowBackup="false"
+        android:icon="@android:drawable/ic_menu_mylocation"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.DeadReckoning">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".sensors.SessionRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+    </application>
+
+</manifest>

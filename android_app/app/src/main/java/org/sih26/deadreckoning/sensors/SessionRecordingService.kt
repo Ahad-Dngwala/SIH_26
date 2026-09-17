@@ -1,0 +1,313 @@
+package org.sih26.deadreckoning.sensors
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.IBinder
+import android.os.Looper
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import org.sih26.deadreckoning.MainActivity
+import org.sih26.deadreckoning.R
+import org.sih26.deadreckoning.fusion.FusionPipeline
+import org.sih26.deadreckoning.fusion.FusionSnapshot
+import java.io.File
+
+/**
+ * Foreground service owning sensor ingest, GNSS, logging and the fusion pipeline.
+ *
+ * The non-negotiable traps this class exists to not fall into, each stated once
+ * here rather than scattered as comments at each call site, because getting any one
+ * of them wrong silently invalidates every number this project produces:
+ *
+ * 1. Raw sensors only: [Sensor.TYPE_ACCELEROMETER] and [Sensor.TYPE_GYROSCOPE], never
+ *    `TYPE_LINEAR_ACCELERATION` or `TYPE_ROTATION_VECTOR`. Those apply an
+ *    undocumented vendor fusion that competes with, and would circularly validate,
+ *    this project's own filter.
+ * 2. Raw GNSS only: [LocationManager.GPS_PROVIDER], never
+ *    `FusedLocationProviderClient`, which already blends IMU, WiFi and cell into its
+ *    position.
+ * 3. One clock: every timestamp derives from [SensorEvent.timestamp] /
+ *    [Location.getElapsedRealtimeNanos], the monotonic elapsedRealtime base, never
+ *    wall time, or the two streams cannot be aligned afterwards.
+ * 4. Sensor callbacks run on a dedicated [HandlerThread], never the main thread, and
+ *    the whole fusion step happens there too - [FusionPipeline] is not
+ *    thread-safe by design (see its own docs) and is owned by this one thread.
+ * 5. A persistent foreground notification, or Android throttles or kills sensor
+ *    delivery once the screen turns off, which is exactly when a test drive is
+ *    unattended.
+ * 6. The blackout is simulated in software. GNSS keeps arriving and keeps being
+ *    logged the entire time; only whether it reaches the filter is gated. Airplane
+ *    mode would destroy the withheld ground truth and cost 10-30s of reacquisition.
+ */
+class SessionRecordingService : Service() {
+
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "recording"
+        const val NOTIFICATION_ID = 1
+
+        const val ACTION_START = "org.sih26.deadreckoning.action.START"
+        const val ACTION_STOP = "org.sih26.deadreckoning.action.STOP"
+        const val ACTION_SET_BLACKOUT = "org.sih26.deadreckoning.action.SET_BLACKOUT"
+        const val EXTRA_BLACKOUT_ACTIVE = "blackout_active"
+
+        // 100 Hz. SENSOR_DELAY_FASTEST is deliberately NOT used: on some devices it
+        // delivers 400-500 Hz, burning battery and CPU for resolution nothing here
+        // uses. An explicit period pins the rate to what was actually measured and
+        // designed against.
+        const val SAMPLING_PERIOD_US = 10_000
+
+        const val GNSS_MIN_INTERVAL_MS = 1000L
+        const val GNSS_MIN_DISTANCE_M = 0f
+
+        /** Callback for the UI. Set by MainActivity while bound/visible; the service
+         * runs correctly with this null, since logging and fusion do not depend on
+         * anyone watching. */
+        @Volatile
+        var snapshotListener: ((FusionSnapshot?) -> Unit)? = null
+
+        @Volatile
+        var statusListener: ((String) -> Unit)? = null
+    }
+
+    private lateinit var sensorManager: SensorManager
+    private lateinit var locationManager: LocationManager
+    private lateinit var thread: HandlerThread
+    private lateinit var handler: Handler
+
+    private var logger: SessionLogger? = null
+    private var pipeline: FusionPipeline? = null
+
+    private var sessionStartElapsedNs: Long = 0L
+    private var latestMagnetometer: FloatArray? = null
+
+    private val sensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            when (event.sensor.type) {
+                Sensor.TYPE_MAGNETIC_FIELD -> {
+                    // Magnetometer arrives on its own cadence and nothing here fuses
+                    // it (see session.py's schema docs on why it is logged anyway);
+                    // the latest sample is attached to the next IMU record rather
+                    // than logged as its own event, since the schema ties mx/my/mz
+                    // to the imu record.
+                    latestMagnetometer = event.values.copyOf()
+                    return
+                }
+                Sensor.TYPE_ACCELEROMETER -> {
+                    lastAccel = event.values.copyOf()
+                    lastAccelTimestampNs = event.timestamp
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    lastGyro = event.values.copyOf()
+                }
+                else -> return
+            }
+            maybeEmitImuSample(event.timestamp)
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
+    }
+
+    // Accelerometer and gyroscope are delivered as separate events even when
+    // requested at the same rate; a cycle is emitted whenever a fresh accelerometer
+    // sample arrives, carrying whatever the most recent gyro sample was. This
+    // matches how the offline reference already treats one IMU record as one
+    // (accel, gyro) pair and avoids either stream blocking on the other.
+    private var lastAccel: FloatArray? = null
+    private var lastGyro: FloatArray? = null
+    private var lastAccelTimestampNs: Long = 0L
+
+    private fun maybeEmitImuSample(timestampNs: Long) {
+        val accel = lastAccel ?: return
+        val gyro = lastGyro ?: return
+
+        val tSeconds = (timestampNs - sessionStartElapsedNs) / 1_000_000_000.0
+        val mag = latestMagnetometer
+
+        logger?.logImu(
+            tSeconds,
+            accel[0].toDouble(), accel[1].toDouble(), accel[2].toDouble(),
+            gyro[0].toDouble(), gyro[1].toDouble(), gyro[2].toDouble(),
+            mag?.get(0)?.toDouble(), mag?.get(1)?.toDouble(), mag?.get(2)?.toDouble()
+        )
+
+        val snapshot = pipeline?.onImu(
+            timestampNs,
+            doubleArrayOf(accel[0].toDouble(), accel[1].toDouble(), accel[2].toDouble()),
+            doubleArrayOf(gyro[0].toDouble(), gyro[1].toDouble(), gyro[2].toDouble())
+        )
+        if (snapshot != null) {
+            logger?.logFused(snapshot.tSeconds, snapshot.fusedNorth, snapshot.fusedEast)
+            snapshotListener?.invoke(snapshot)
+        }
+    }
+
+    private var blackoutActive = false
+
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            val tSeconds = (location.elapsedRealtimeNanos - sessionStartElapsedNs) / 1_000_000_000.0
+            val speed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
+            val bearing = if (location.hasBearing()) location.bearing.toDouble() else 0.0
+            val accuracy = if (location.hasAccuracy()) location.accuracy.toDouble() else 50.0
+
+            // Always logged, regardless of blackout state - withheld fixes are the
+            // ground truth the drift is measured against.
+            logger?.logGnss(
+                tSeconds, location.latitude, location.longitude,
+                speed, bearing, accuracy, withheld = blackoutActive
+            )
+
+            // Always fed to the pipeline too. onGnss's own blackout branch decides
+            // whether the fix reaches the filter or only the ground-truth
+            // accounting - see FusionPipeline.onGnss's docs.
+            pipeline?.onGnss(
+                FusionPipeline.GnssFix(
+                    tNs = location.elapsedRealtimeNanos,
+                    latDeg = location.latitude,
+                    lonDeg = location.longitude,
+                    speedMps = speed,
+                    bearingDeg = bearing,
+                    accuracyM = accuracy
+                )
+            )
+
+            statusListener?.invoke(pipeline?.describeFrontEnd() ?: "")
+        }
+
+        @Deprecated("Deprecated in API 29, still required on API 26 targets")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
+        override fun onProviderEnabled(provider: String) = Unit
+        override fun onProviderDisabled(provider: String) = Unit
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+        thread = HandlerThread("sih26-sensor-ingest")
+        thread.start()
+        handler = Handler(thread.looper)
+
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> startRecording()
+            ACTION_STOP -> stopRecording()
+            ACTION_SET_BLACKOUT -> {
+                val active = intent.getBooleanExtra(EXTRA_BLACKOUT_ACTIVE, false)
+                blackoutActive = active
+                pipeline?.setBlackout(active, System.nanoTime())
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun startRecording() {
+        startForeground(NOTIFICATION_ID, buildNotification())
+
+        sessionStartElapsedNs = android.os.SystemClock.elapsedRealtimeNanos()
+        pipeline = FusionPipeline()
+
+        val outDir = File(getExternalFilesDir(null), "sessions")
+        outDir.mkdirs()
+        val outFile = File(outDir, "session_${System.currentTimeMillis()}.jsonl")
+        logger = SessionLogger(
+            outFile,
+            device = android.os.Build.MODEL ?: "unknown",
+            notes = "recorded by SessionRecordingService"
+        )
+
+        if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            statusListener?.invoke("ERROR: location permission not granted")
+            return
+        }
+
+        val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+        if (accelerometer == null || gyroscope == null) {
+            statusListener?.invoke("ERROR: device is missing accelerometer or gyroscope")
+            return
+        }
+
+        sensorManager.registerListener(sensorListener, accelerometer, SAMPLING_PERIOD_US, handler)
+        sensorManager.registerListener(sensorListener, gyroscope, SAMPLING_PERIOD_US, handler)
+        if (magnetometer != null) {
+            // Best effort, at whatever rate is convenient - nothing consumes this
+            // stream, it is logged only so PS 26168's named inputs are all captured.
+            sensorManager.registerListener(sensorListener, magnetometer, SensorManager.SENSOR_DELAY_NORMAL, handler)
+        }
+
+        locationManager.requestLocationUpdates(
+            LocationManager.GPS_PROVIDER,
+            GNSS_MIN_INTERVAL_MS,
+            GNSS_MIN_DISTANCE_M,
+            locationListener,
+            thread.looper
+        )
+    }
+
+    private fun stopRecording() {
+        sensorManager.unregisterListener(sensorListener)
+        locationManager.removeUpdates(locationListener)
+        logger?.close()
+        logger = null
+        pipeline = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        logger?.close()
+        thread.quitSafely()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            getString(R.string.notification_channel_name),
+            NotificationManager.IMPORTANCE_LOW
+        )
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun buildNotification(): Notification {
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(getString(R.string.notification_text))
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+}
