@@ -86,6 +86,59 @@ def test_forward_axis_sign_follows_the_speed_reference():
     assert float(np.dot(forward, backward)) < -0.9
 
 
+def test_forward_axis_survives_a_turn_dominated_window():
+    """The failure this estimator was changed to fix.
+
+    In a turn, lateral specific force is speed times yaw rate, which at road
+    speeds is several times larger than the longitudinal content of ordinary
+    speed variation. A window with enough turning in it therefore has its
+    variance dominated by the lateral axis, and a PCA-first estimator
+    confidently returns the axis at ninety degrees to the right answer. Channel
+    P then integrates cornering force as though it were acceleration.
+
+    The offline whole-session caller never saw this, because a full session has
+    enough straight driving to dilute the turns. An online caller on a phone
+    only has the samples up to now, and passes through exactly this regime
+    during the first minute of every drive.
+
+    Constructed so the lateral signal is genuinely larger and genuinely
+    uncorrelated with speed change, which is what makes the correlation
+    estimator immune to it.
+    """
+    rng = np.random.default_rng(7)
+    n = 800
+    forward_axis = np.array([np.cos(0.4), np.sin(0.4)])
+    lateral_axis = np.array([-forward_axis[1], forward_axis[0]])
+
+    speed_delta = rng.normal(0.0, 0.5, size=n)
+    cornering = np.zeros(n)
+    cornering[200:600] = 1.4  # a sustained turn, three times the longitudinal scale
+
+    horizontal = (
+        speed_delta[:, None] * forward_axis
+        + cornering[:, None] * lateral_axis
+        + rng.normal(0.0, 0.05, size=(n, 2))
+    )
+
+    axis = estimate_forward_axis(horizontal, reference_speed_delta=speed_delta)
+
+    assert float(np.dot(axis, forward_axis)) > 0.95
+
+
+def test_forward_axis_falls_back_to_pca_without_a_speed_reference():
+    """No speed reference means nothing to correlate against, so the estimator
+    has to fall back to variance and the caller owns the sign ambiguity. This
+    path still has to work: it is what runs before the first GNSS fix."""
+    rng = np.random.default_rng(3)
+    true_axis = np.array([np.cos(1.1), np.sin(1.1)])
+    magnitudes = rng.normal(0.0, 1.5, size=400)
+    horizontal = magnitudes[:, None] * true_axis + rng.normal(0.0, 0.05, size=(400, 2))
+
+    axis = estimate_forward_axis(horizontal)
+
+    assert abs(float(np.dot(axis, true_axis))) > 0.98
+
+
 # --- the channel itself -------------------------------------------------------
 
 

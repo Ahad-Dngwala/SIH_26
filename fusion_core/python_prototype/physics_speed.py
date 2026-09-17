@@ -151,17 +151,72 @@ def estimate_forward_axis(
 ) -> np.ndarray:
     """Resolve which horizontal direction is vehicle-forward.
 
-    `horizontal_accel` is (N, 2) level-frame horizontal specific force
-    over a window of *driving* (not stationary). Accelerate and brake
-    events dominate its variance and lie along the longitudinal axis,
-    so the first principal component is the longitudinal direction.
+    `horizontal_accel` is (N, 2) level-frame horizontal specific force over a
+    window of *driving* (not stationary).
 
-    PCA gives an axis, not a direction - the sign is ambiguous. If
-    `reference_speed_delta` (N,) is supplied, typically GNSS speed
-    differences over the same window, the sign is chosen so that
-    positive projected acceleration corresponds to increasing speed.
-    Without it the caller gets an arbitrary but consistent sign and is
-    responsible for the ambiguity.
+    Two estimators, and which one runs depends on whether a speed reference is
+    available:
+
+    **With `reference_speed_delta`** (N,), typically GNSS speed differences over
+    the same window: the axis is the direction whose acceleration actually
+    explains the speed change, computed as the cross-correlation vector
+    `centered.T @ delta`, normalised. This resolves the axis and its sign
+    together, in one step.
+
+    **Without it**: first principal component, on the assumption that
+    accelerate and brake events dominate horizontal variance. PCA gives an axis,
+    not a direction, so the sign is left arbitrary and the caller owns the
+    ambiguity.
+
+    Why the correlation estimator is preferred, measured rather than asserted
+    ------------------------------------------------------------------------
+    PCA's assumption fails on any window where turning dominates braking. In a
+    turn, lateral specific force is `speed * yaw_rate`; at 13 m/s and 6 deg/s
+    that is about 1.4 m/s^2, while the longitudinal content of normal
+    speed variation on the same route is around 0.5 m/s^2. So a window with a
+    high enough proportion of turning has its variance dominated by the
+    *lateral* axis, and PCA confidently returns the axis at ninety degrees to
+    the right answer. Channel P then integrates cornering force as though it
+    were acceleration.
+
+    This is not hypothetical. Measured against the known mount rotation of
+    `tools/phone_replay/synth_session.py`, as dot product with the true forward
+    axis, over the first N moving samples:
+
+    | samples | PCA    | correlation |
+    |---------|--------|-------------|
+    | 1000    | 1.0000 | 1.0000      |
+    | 3000    | 0.9747 | 0.9839      |
+    | 5000    | 0.9686 | 0.9824      |
+    | 6000    | 0.3640 | 0.9912      |
+    | 9000    | 0.9999 | 0.9981      |
+    | 12000   | 1.0000 | 0.9999      |
+    | 15404   | 1.0000 | 0.9999      |
+
+    The 6000 row is a 69-degree error. PCA recovers by 9000 samples because the
+    session's later straight sections dilute the turns, which is exactly why the
+    offline whole-session caller never saw this: it always has 15000 samples. An
+    *online* caller on a phone only has the samples up to now, and passes
+    through that 6000-sample window during the first minute of every drive,
+    which on a demo route is when the blackout happens.
+
+    Turning does not change speed, so it contributes nothing to the correlation
+    in expectation. That is the whole reason the second estimator is steadier,
+    and it is a property of the physics rather than of this dataset.
+
+    The trade, stated rather than hidden: given the whole session, PCA is very
+    slightly the better of the two (1.0000 against 0.9999), and switching the
+    offline tool to the correlation estimator moved its Channel P drift on the
+    60-90 s window from 0.46% to 1.50%. That is the price. It buys a worst case
+    across every window size of 0.982 instead of 0.364, and the phone is causal
+    and has no choice but to run on a partial window. Both numbers are far under
+    PS 26168's 10% bar, so paying a point of drift for an estimator that cannot
+    silently point sideways is the right way round.
+
+    The correlation vector degenerates when speed is genuinely constant across
+    the window, since then there is no speed change to correlate against. That
+    case falls back to PCA with a sign fixed the old way, which is no worse than
+    what was here before.
     """
     horizontal_accel = np.asarray(horizontal_accel, dtype=float)
     if horizontal_accel.ndim != 2 or horizontal_accel.shape[1] != 2:
@@ -170,12 +225,27 @@ def estimate_forward_axis(
         raise ValueError("need at least 3 samples to estimate a forward axis")
 
     centered = horizontal_accel - horizontal_accel.mean(axis=0)
+
+    if reference_speed_delta is not None:
+        reference_speed_delta = np.asarray(reference_speed_delta, dtype=float)
+        n = min(len(centered), len(reference_speed_delta))
+        correlation_vector = centered[:n].T @ reference_speed_delta[:n]
+        magnitude = float(np.linalg.norm(correlation_vector))
+        # A scale-free floor: the correlation is meaningful only when it is
+        # large relative to the acceleration and speed-change magnitudes that
+        # produced it. Near zero means the window carried no usable
+        # longitudinal signal.
+        scale = float(
+            np.linalg.norm(centered[:n]) * np.linalg.norm(reference_speed_delta[:n])
+        )
+        if magnitude > 1e-9 and magnitude > 1e-6 * max(scale, 1e-12):
+            return correlation_vector / magnitude
+
     _, _, vt = np.linalg.svd(centered, full_matrices=False)
     axis = vt[0]
     axis = axis / np.linalg.norm(axis)
 
     if reference_speed_delta is not None:
-        reference_speed_delta = np.asarray(reference_speed_delta, dtype=float)
         projected = centered @ axis
         n = min(len(projected), len(reference_speed_delta))
         correlation = float(np.dot(projected[:n], reference_speed_delta[:n]))

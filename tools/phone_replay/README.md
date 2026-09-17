@@ -96,8 +96,15 @@ over 60-90 s:
 | configuration | drift | verdict |
 |---|---|---|
 | no velocity channel | 36.39% | FAIL |
-| Channel P | 0.46% | PASS |
-| Channel P + NHC | 0.52% | PASS |
+| Channel P | 1.50% | PASS |
+| Channel P + NHC | 1.51% | PASS |
+
+The Channel P rows read 0.46% and 0.52% before the forward-axis estimator
+changed from PCA to correlation against GNSS speed change. The estimator is
+slightly less accurate given a whole session and dramatically more robust given
+a partial one, which is what a phone actually has; the reasoning and the
+measured comparison are in `estimate_forward_axis`'s docstring. The no-channel
+row is unaffected, since that configuration never resolves a forward axis.
 
 The no-channel case fails the PS bar outright, because the CTCV process
 model coasts at constant speed and this route changes speed constantly.

@@ -124,12 +124,12 @@ def make_session(
     accel_phone = accel_vehicle @ rotation.T
     gyro_phone = gyro_vehicle @ rotation.T
     mag_phone = mag_vehicle @ rotation.T
-    mag_phone += rng.normal(0.0, 0.4, size=mag_phone.shape)
 
     accel_phone += rng.normal(0.0, 0.08, size=accel_phone.shape)
     accel_phone += rng.normal(0.0, 0.03, size=3)  # fixed bias per session
     gyro_phone += rng.normal(0.0, 0.004, size=gyro_phone.shape)
     gyro_phone += rng.normal(0.0, 0.001, size=3)
+
 
     # Ragged delivery: Android jitters sample timestamps by a few ms.
     imu_t = t + rng.normal(0.0, 0.0015, size=n)
@@ -147,6 +147,18 @@ def make_session(
     )
     gnss_speed = np.maximum(0.0, speed[idx] + rng.normal(0.0, 0.25, size=len(idx)))
     gnss_bearing = np.degrees(heading[idx]) % 360.0
+
+    # Magnetometer noise is drawn LAST, after every other draw in this function,
+    # so that adding this stream does not shift the random sequence feeding the
+    # accelerometer, the gyro, the timestamp jitter or GNSS. A draw inserted
+    # anywhere earlier silently changes the noise realisation of every existing
+    # session at the same seed, and with it every measured number in this repo
+    # that was computed from one. That is not a hypothetical: it happened while
+    # this stream was being added, and it moved the no-velocity-channel drift on
+    # the 60-90 s window from 36.39% to 55.40% with no code change that could
+    # explain it. Any future stream added here goes at the end for the same
+    # reason.
+    mag_phone += rng.normal(0.0, 0.4, size=mag_phone.shape)
 
     return PhoneSession(
         header={
