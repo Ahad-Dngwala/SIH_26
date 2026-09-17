@@ -57,6 +57,17 @@ def main(config_path: str | Path = _DEFAULT_CONFIG_PATH) -> None:
         f"({drift.position_error_at_end_m:.2f} m over "
         f"{drift.distance_traveled_m:.2f} m traveled)"
     )
+    # See drift.py's module docstring: drift_pct is the PS 26168 number,
+    # but it samples a single instant. Worst-case is what tells you
+    # whether a change actually helped.
+    print(
+        f"Worst error inside window: {drift.max_error_m:.2f} m "
+        f"({drift.max_error_pct:.2f}%), RMS {drift.rms_error_m:.2f} m"
+    )
+    print(
+        "PS 26168 benchmark (<10% drift): "
+        + ("PASS" if drift.meets_ps_benchmark else "FAIL")
+    )
 
     repo_root = Path(__file__).resolve().parents[2]
     plot_path = repo_root / config["output"]["plot_path"]
