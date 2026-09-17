@@ -134,6 +134,41 @@ class MountLeveling(val rotation: Array<DoubleArray>, val gravityMagnitude: Doub
  * cost are constant no matter how long the drive, and the estimate uses every moving
  * sample seen so far rather than an arbitrary recent window.
  */
+/**
+ * Resolves which horizontal direction is vehicle-forward, online.
+ *
+ * Ported from the Python reference's `estimate_forward_axis`, joint-regressor path:
+ * a 2x2 least-squares fit of centred horizontal specific force against two
+ * regressors, GNSS speed delta and `speed * yawRate` (the lateral force a
+ * non-slipping turn should produce). The forward direction is the loading on the
+ * speed-delta regressor; the lateral loading is computed and discarded.
+ *
+ * Do not simplify this back to a single correlation against speed delta, and
+ * absolutely do not go back to PCA. Both were tried and both fail in ways that do
+ * not crash:
+ *
+ *   - PCA assumes accelerate/brake dominates variance. In a turn, lateral force is
+ *     several times larger than ordinary longitudinal variation, so a turn-heavy
+ *     window has PCA return an axis ninety degrees off. Measured worst case: dot
+ *     0.364 with the known mount rotation.
+ *   - Correlation against speed delta alone degrades whenever speed change and
+ *     cornering are themselves correlated, which happens whenever a route's early
+ *     turns coincide with its early speed changes (both cluster around junctions).
+ *     Measured worst case: dot 0.9825, an 11-degree error, right where a route's
+ *     early blackout is most likely to land. That error leaked cornering force
+ *     into Channel P and moved a synthetic session's blackout drift from 1.50% to
+ *     29.8% before it was diagnosed.
+ *
+ * The joint fit apportions each regressor its own share of the variance via least
+ * squares, which is what lets it disentangle acceleration from cornering even
+ * while they are correlated with each other - a single correlation cannot do that
+ * regardless of how much data it has. Measured: worst case across window sizes
+ * 1.0000, and it improved even the whole-session offline number, 1.50% to 0.19% on
+ * the same benchmark. Full comparison table is in the Python docstring.
+ *
+ * Accumulates running moments rather than storing samples, so memory and
+ * per-sample cost are constant no matter how long the drive.
+ */
 class ForwardAxisEstimator(
     private val minSpeedMps: Double = 2.0,
     private val minSamples: Int = 300
@@ -145,29 +180,41 @@ class ForwardAxisEstimator(
         const val MAX_INTERVAL_S = 3.0
     }
 
-    // Global running moments over every admitted sample.
+    // Global running moments over every admitted sample. Raw (uncentred) sums;
+    // centring happens once, in estimate(), via the standard scatter identity
+    // S_ab = sum(a*b) - n*mean_a*mean_b.
     private var n: Long = 0
     private var sumX = 0.0
     private var sumY = 0.0
+    private var sumD = 0.0
+    private var sumQ = 0.0
+    private var sumDD = 0.0
+    private var sumQQ = 0.0
+    private var sumDQ = 0.0
+    private var sumXD = 0.0
+    private var sumYD = 0.0
+    private var sumXQ = 0.0
+    private var sumYQ = 0.0
+    // Kept for the single-regressor and PCA fallback paths only.
     private var sumXX = 0.0
     private var sumXY = 0.0
     private var sumYY = 0.0
-    private var sumD = 0.0
-    private var sumXD = 0.0
-    private var sumYD = 0.0
 
     // Accumulators for the samples since the last GNSS fix. GNSS speed change is
-    // only known once the fix that ends an interval arrives, so samples are held
-    // here and folded in with the delta that actually covers them. Applying each
-    // delta to the samples that follow it instead costs a full second of lag
-    // between an acceleration and the speed change it caused, which decorrelates
-    // the very signal this estimator runs on. Measured: with the lag, the axis
-    // landed 7.4 degrees off the known mount rotation and leaked enough cornering
-    // force into Channel P to push blackout drift to 38%. Without it, under a
-    // degree.
+    // only known once the fix that ends an interval arrives, so samples (and the
+    // per-sample lateral regressor, which needs no fix to compute) are held here
+    // and folded into the global moments with the delta that actually covers them.
+    // Applying a delta to the samples that follow it instead costs a full second of
+    // lag between an acceleration and the speed change it caused, which
+    // decorrelates the very signal this estimator runs on. Measured: with the lag,
+    // the axis landed 7.4 degrees off the known mount rotation.
     private var intervalN: Long = 0
     private var intervalSumX = 0.0
     private var intervalSumY = 0.0
+    private var intervalSumQ = 0.0
+    private var intervalSumQQ = 0.0
+    private var intervalSumXQ = 0.0
+    private var intervalSumYQ = 0.0
     private var intervalSumXX = 0.0
     private var intervalSumXY = 0.0
     private var intervalSumYY = 0.0
@@ -179,8 +226,10 @@ class ForwardAxisEstimator(
 
     val sampleCount: Long get() = n
 
-    /** Buffer one sample. Nothing is committed until the interval closes. */
-    fun addSample(horizontal: DoubleArray, speedMps: Double) {
+    /** Buffer one sample. `lateralRegressor` is `speed * yawRate` for this sample,
+     * computed with no forward axis needed since it lives entirely in the level
+     * frame. Nothing is committed until the interval closes. */
+    fun addSample(horizontal: DoubleArray, speedMps: Double, lateralRegressor: Double) {
         if (speedMps <= minSpeedMps) return
         val x = horizontal[0]
         val y = horizontal[1]
@@ -190,24 +239,25 @@ class ForwardAxisEstimator(
         intervalSumXX += x * x
         intervalSumXY += x * y
         intervalSumYY += y * y
+        intervalSumQ += lateralRegressor
+        intervalSumQQ += lateralRegressor * lateralRegressor
+        intervalSumXQ += x * lateralRegressor
+        intervalSumYQ += y * lateralRegressor
     }
 
     /**
      * Close the current interval with the GNSS speed change that occurred across it,
-     * folding its buffered samples into the running moments.
+     * folding its buffered samples into the running moments. The delta is constant
+     * across the interval, so sums involving it reduce to (delta times the
+     * interval's sum), no per-sample history needed.
      *
-     * Since the delta is constant across the interval, the per-sample sum of
-     * x_i * d reduces to d times the interval's sum of x, so no sample history is
-     * needed to get the correlation exactly right.
-     *
-     * `intervalSeconds` guards against attributing a long gap's total speed change to
-     * every sample inside it. A blackout produces exactly that gap: no fix reaches
-     * the pipeline for the whole window, and folding thirty seconds of buffered
-     * samples in with a thirty-second speed delta swamps every honest interval before
-     * it. Measured: that single mistake moved the axis from under a degree off the
-     * known mount rotation to thirteen degrees off, and took blackout drift from
-     * 1.6% to 30%. Over-long intervals are discarded, not clamped: there is no
-     * correct weight for them.
+     * `intervalSeconds` guards against attributing a long gap's total speed change
+     * to every sample inside it. A blackout produces exactly that gap: no fix
+     * reaches the pipeline for the whole window, and folding thirty seconds of
+     * buffered samples in with a thirty-second delta swamps every honest interval
+     * before it. Measured: that single mistake took blackout drift from 1.6% to
+     * 30%. Over-long intervals are discarded, not clamped: there is no correct
+     * weight for them.
      */
     fun closeInterval(speedChange: Double, intervalSeconds: Double = 1.0) {
         if (intervalN == 0L) return
@@ -222,8 +272,14 @@ class ForwardAxisEstimator(
         sumXY += intervalSumXY
         sumYY += intervalSumYY
         sumD += speedChange * intervalN
+        sumDD += speedChange * speedChange * intervalN
         sumXD += intervalSumX * speedChange
         sumYD += intervalSumY * speedChange
+        sumQ += intervalSumQ
+        sumQQ += intervalSumQQ
+        sumXQ += intervalSumXQ
+        sumYQ += intervalSumYQ
+        sumDQ += speedChange * intervalSumQ
 
         discardInterval()
     }
@@ -238,6 +294,10 @@ class ForwardAxisEstimator(
         intervalSumXX = 0.0
         intervalSumXY = 0.0
         intervalSumYY = 0.0
+        intervalSumQ = 0.0
+        intervalSumQQ = 0.0
+        intervalSumXQ = 0.0
+        intervalSumYQ = 0.0
     }
 
     fun hasEnough(): Boolean = n >= minSamples
@@ -253,13 +313,40 @@ class ForwardAxisEstimator(
         val count = n.toDouble()
         val meanX = sumX / count
         val meanY = sumY / count
+        val meanD = sumD / count
+        val meanQ = sumQ / count
 
-        // Cross-correlation of centred horizontal accel with speed change. Expanding
-        // sum((x - mx) * d) gives sumXD - mx * sumD, so no sample history is needed.
-        var ax = sumXD - meanX * sumD
-        var ay = sumYD - meanY * sumD
+        val sdd = sumDD - count * meanD * meanD
+        val sqq = sumQQ - count * meanQ * meanQ
+        val sdq = sumDQ - count * meanD * meanQ
+        val sdx = sumXD - count * meanD * meanX
+        val sdy = sumYD - count * meanD * meanY
+        val sqx = sumXQ - count * meanQ * meanX
+        val sqy = sumYQ - count * meanQ * meanY
+
+        val det = sdd * sqq - sdq * sdq
+        // Scale-free rank check: a determinant that is a tiny fraction of sdd*sqq
+        // means the two regressors are numerically collinear (or one is ~constant),
+        // so the 2x2 solve cannot separate forward from lateral. Fall through to the
+        // single-regressor path rather than trust an ill-conditioned inverse.
+        if (abs(det) > 1e-9 * max(abs(sdd * sqq), 1e-12)) {
+            var fx = (sqq * sdx - sdq * sqx) / det
+            var fy = (sqq * sdy - sdq * sqy) / det
+            val magnitude = sqrt(fx * fx + fy * fy)
+            if (magnitude > 1e-9) {
+                fx /= magnitude
+                fy /= magnitude
+                val resolved = doubleArrayOf(fx, fy)
+                axis = resolved
+                signResolved = true
+                return resolved
+            }
+        }
+
+        // Single-regressor fallback: correlation against speed delta alone.
+        var ax = sdx
+        var ay = sdy
         var magnitude = sqrt(ax * ax + ay * ay)
-
         if (magnitude > 1e-9) {
             ax /= magnitude
             ay /= magnitude
@@ -269,10 +356,9 @@ class ForwardAxisEstimator(
             return resolved
         }
 
-        // Degenerate: speed was effectively constant across everything seen, so
-        // there is nothing to correlate against. Fall back to the principal axis of
-        // the centred data, with the sign left unresolved, matching the Python
-        // reference's no-reference path.
+        // Fully degenerate: speed was effectively constant across everything seen.
+        // Fall back to the principal axis of the centred data, sign unresolved,
+        // matching the Python reference's no-reference path.
         val sxx = sumXX - count * meanX * meanX
         val sxy = sumXY - count * meanX * meanY
         val syy = sumYY - count * meanY * meanY
@@ -302,9 +388,8 @@ class ForwardAxisEstimator(
         sumX = 0.0; sumY = 0.0
         sumXX = 0.0; sumXY = 0.0; sumYY = 0.0
         sumD = 0.0; sumXD = 0.0; sumYD = 0.0
-        intervalN = 0
-        intervalSumX = 0.0; intervalSumY = 0.0
-        intervalSumXX = 0.0; intervalSumXY = 0.0; intervalSumYY = 0.0
+        sumQ = 0.0; sumDD = 0.0; sumQQ = 0.0; sumDQ = 0.0; sumXQ = 0.0; sumYQ = 0.0
+        discardInterval()
         axis = null
         signResolved = false
     }

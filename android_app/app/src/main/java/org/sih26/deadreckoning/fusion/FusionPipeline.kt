@@ -327,7 +327,7 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
         // No samples are buffered during a blackout: there is no speed reference to
         // attribute them to, and attributing them to the next one that arrives is
         // what corrupts the axis.
-        if (!blackout) forwardAxis.addSample(horizontal, currentSpeed)
+        if (!blackout) forwardAxis.addSample(horizontal, currentSpeed, currentSpeed * yawRate)
         if (fix != null) {
             val previousSpeed = lastAdmittedSpeed
             lastSpeedDelta = if (previousSpeed == null) 0.0 else fix.speedMps - previousSpeed

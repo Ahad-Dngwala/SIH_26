@@ -33,6 +33,7 @@ python3 -m tools.parity.export_fixture_csv --output "$work_dir/fixture.csv"
 echo "Compiling the Kotlin fusion core and harness"
 kotlinc \
   "$fusion_src/LinAlg.kt" \
+  "$fusion_src/Geo.kt" \
   "$fusion_src/Ukf.kt" \
   "$harness_src/VerifyParity.kt" \
   -include-runtime -d "$work_dir/parity.jar" 2>&1 | grep -v '^warning: ' || true
