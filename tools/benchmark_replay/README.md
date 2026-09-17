@@ -1,5 +1,18 @@
 # tools/benchmark_replay/
 
+> **Read this before quoting any number from this tool.** Every drift
+> figure produced here is **synthetic-route only**, with Channel A and
+> Channel B running as **dummies fed noised ground-truth velocity**.
+> That makes these numbers a measure of the UKF's math quality *given
+> near-perfect velocity input* - not a system accuracy figure, and not
+> something to put on a slide without this sentence attached. **No
+> real-data validation exists yet** (`data/processed/` is empty and
+> `route_loader.load_io_vnbd_route` still raises `NotImplementedError`).
+> For the honest "what the phone does today" baseline - the same route
+> with no velocity channel at all - see `channel_a: none` /
+> `channel_b: none` in `config.yaml` and the table in
+> `../../fusion_core/python_prototype/README.md`.
+
 [Layer 2 - Fusion & Map] MIP Section 9. **"Build this in parallel with
 Layer 1's model training, not after it"** - and per Section 9's closing
 line: "This tool is the single most important thing to have working

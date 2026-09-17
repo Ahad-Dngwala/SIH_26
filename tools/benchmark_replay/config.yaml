@@ -2,10 +2,31 @@
 #
 # MIP Section 9 / docs/HANDOFF_benchmark_replay_tool.md.
 #
-# Phase 4 update: real Channel A, Channel B, and UKF fusion components are now
-# wired up. Flip channel_a and channel_b to "real" once their ONNX models are
-# exported (after Phase 2 and Phase 3 training). Map matching stays "dummy"
-# until Phase 5 (HMM/Viterbi + OSM graph) is complete.
+# ACTUAL COMPONENT STATE (keep this block in sync with `components:` below -
+# it previously claimed Channel A/B were "real ✅" while the switches said
+# `dummy`, which is how a wrong number ends up on a slide):
+#
+#   fusion:         real    - fusion_core/python_prototype/ukf.py
+#   channel_a:      dummy   - noised ground-truth velocity, NOT a model.
+#                             The trained Channel A was rejected at its
+#                             acceptance gate (+1.54 m/s bias, see
+#                             ../../final_report.md) and never exported to
+#                             ONNX, so there is nothing to flip to "real".
+#   channel_b:      dummy   - noised ground-truth velocity. Never trained;
+#                             its label function does not exist yet.
+#   road_signature: dummy   - never returns a confident match.
+#   map_matching:   dummy   - identity snap.
+#
+# The RealVelocityEstimator / RealHmmMapMatcher code paths exist and are
+# wired, but no exported model or OSM graph exists in this repo to point
+# them at. Setting channel_a/channel_b to "real" today will fail on a
+# missing .onnx file.
+#
+# CAVEAT ON EVERY DRIFT NUMBER THIS TOOL PRODUCES: the default route is
+# synthetic and channel_a/channel_b are dummies fed noised ground-truth
+# velocity. Drift figures from this config measure the UKF's math quality
+# given near-perfect velocity input. They are NOT system accuracy figures
+# and must not be presented as such. No real-data validation exists yet.
 
 route:
   source: synthetic          # synthetic | io_vnbd
@@ -29,20 +50,20 @@ blackout:
   end_s: 100
 
 # Section 2 of the handoff doc: five swappable components.
-# Checkpoint progress:
-#   ✅ fusion: real  (Checkpoint 1 - ukf.py)
-#   ✅ channel_a: real  (Phase 4 - flip to 'real' after Phase 2 ONNX export)
-#   ✅ channel_b: real  (Phase 4 - flip to 'real' after Phase 3 training + export)
-#   ⬜ road_signature: real  (Phase 4 + 5 - needs labeling + training)
-#   ⬜ map_matching: real  (Phase 5 - needs OSM extraction + Viterbi)
+# Checkpoint progress (⬜ = still dummy in this repo, no exception):
+#   ✅ fusion: real          (Checkpoint 1 - ukf.py)
+#   ⬜ channel_a: real       blocked - trained model rejected at gate, no ONNX
+#   ⬜ channel_b: real       blocked - never trained, no label function
+#   ⬜ road_signature: real  blocked - needs labeling + training
+#   ⬜ map_matching: real    blocked - needs OSM extraction + Viterbi
 #
-# To run with real models (after export):
-#   1. Set channel_a: real, channel_b: real
+# To run with real models (once an export actually exists):
+#   1. Set channel_a: real and/or channel_b: real
 #   2. Fill in the channel_a and channel_b sections below with correct paths
-#   3. Optionally set fusion: real (already real by default)
+#   3. Update the r_channel_a / r_channel_b overrides to the measured RMSE
 components:
-  channel_a: dummy          # dummy | real  (flip to 'real' after Phase 2 export)
-  channel_b: dummy          # dummy | real  (flip to 'real' after Phase 3 export)
+  channel_a: dummy          # dummy | real  (no export exists - see header)
+  channel_b: dummy          # dummy | real  (no export exists - see header)
   road_signature: dummy     # dummy | real  (real needs road_signature model, Phase 5)
   fusion: real              # dummy | real  (real = fusion_core/python_prototype/ukf.py)
   map_matching: dummy       # dummy | real  (real = HMM/Viterbi, Phase 5)

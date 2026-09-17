@@ -1,5 +1,15 @@
 # fusion_core/python_prototype/
 
+> **Read this before quoting any drift number from this file.** Every
+> drift figure quoted below (1.486%, 1.49%, the NHC ablation table, all
+> of it) was measured on a **synthetic route** with Channel A and
+> Channel B set to **dummy** - i.e. fed noised ground-truth velocity.
+> Those numbers measure how good this filter's math is *when handed
+> near-perfect velocity evidence*. They are **not** system accuracy
+> figures and must not be presented as such. **No real-data validation
+> exists yet.** The honest "what the phone does today" number, with no
+> velocity channel at all, is in the table further down.
+
 [Layer 2 - Fusion & Map] MIP Section 5.5 step 1. UKF prototype, built
 with `filterpy`'s `UnscentedKalmanFilter` class or a custom
 implementation if filterpy's API doesn't fit the 4-source update

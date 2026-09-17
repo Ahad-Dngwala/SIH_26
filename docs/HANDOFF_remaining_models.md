@@ -81,7 +81,7 @@ the actual downloaded IO-VNBD data to take effect).
 | Component | Section | Status | Blocked on |
 |---|---|---|---|
 | `alignment_net` | 4.1 | Scaffolded, label-derivation implemented (`build_alignment_net` in `03_window.py`), **not yet trained** | Nothing - ready to window/train once `00-05` has been re-run with the alignment-gate fix |
-| `channel_a_velocity` | 4.2 | Trained, debugged (3 fix commits), val still not hitting target as of the last run | The zero-order-hold baseline (Section 0) - answers whether more tuning is worth it |
+| `channel_a_velocity` | 4.2 | **Trained, evaluated against the zero-order-hold baseline, rejected at the acceptance gate** - beats baseline on RMSE (4.89 vs 6.17) and R² (0.37), fails on persistent +1.54 m/s test bias. Not exported, not wired in. See `final_report.md` | A different architectural approach to the bias - two variants (Δv, 5s absolute) have both failed it |
 | `channel_b_velocity` | 4.3 | Scaffolded (`model.py`/`train.py`/`config.yaml` exist), **`build_channel_b` label function does not exist yet** - `03_window.py`'s own module docstring and `WINDOW_CONFIGS` entry both say "labeling TODO" | Data-side work (Section 2 below), not model work |
 | `road_signature` | 4.4 | Scaffolded, **`build_road_signature` does not exist yet**, and per Section 12 needs real collected corridor data, not just IO-VNBD | Data-side work + the secondary dataset (Section 3.1) - see Section 3 below |
 | `calibration_adapter` | 4.5 | Scaffolded only, explicitly lowest priority | Channel A + Channel B both needing first working versions, plus a real vehicle calibration-drive recording (can't come from IO-VNBD at all) |

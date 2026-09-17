@@ -38,13 +38,36 @@ constraints (no lateral slip, no vertical velocity) are enforced
 downstream in the UKF process model (Section 5), not here. Keep this a
 pure regressor - don't add NHC logic to `model.py` or `train.py`.
 
-**Status:** wired, not yet trained. `dataset.py` loads real windows
-from `data/processed/channel_a_velocity/` (Section 3 output).
-`model.py`'s architecture is a first-draft transcription of Section
-4.2, covered by the Section 11.1 shape/fixed-seed test in `tests/`.
-`export.py` runs end to end (checkpoint -> ONNX -> int8, float16
-fallback on a failed accuracy check) - verified against synthetic data
-in `models/_smoketest_train_export.py`, not yet against a real
-checkpoint. No training run against real data has happened yet.
+**Status: trained, rejected at the acceptance gate, not wired in.**
+Two architectures have been trained against real data - a Δv-label
+variant and a 5s absolute-velocity variant. The 5s absolute model is
+the better of the two and still failed the gate. Consequences of that
+failure, all deliberate: no ONNX export was produced, `ukf.py` was not
+modified, and `tools/benchmark_replay/config.yaml` keeps
+`channel_a: dummy`. Full write-up in
+[`../../final_report.md`](../../final_report.md).
 
-**Current best metric:** none - no training run has happened yet.
+**Current best metric (5s absolute-velocity model, held-out test):**
+
+| Metric | Value | Baseline | Verdict |
+|---|---|---|---|
+| RMSE | 4.89 m/s | 6.17 m/s (zero-order hold) | pass |
+| R² | 0.370 | 0.318 (earlier abs model) | pass |
+| Session spread | Vta16 0.36 / Vta24 0.48 / Vta21 -0.27 | - | pass (not one-session) |
+| Bias | **+1.54 m/s** | target ≈ 0 | **fail** |
+
+The bias is the blocker, not the RMSE. A channel whose output gets
+integrated into position cannot carry a persistent +1.5 m/s offset -
+over a 60s blackout that alone is ~90 m of along-track error. Note
+also that RMSE 4.89 m/s is nowhere near this section's own 0.5 m/s
+target, so `FusionConfig.r_channel_a = 0.5` remains aspirational and
+must not be used as if it were measured.
+
+**Infrastructure status (unchanged, still true):** `dataset.py` loads
+real windows from `data/processed/channel_a_velocity/` (Section 3
+output). `model.py`'s architecture is a first-draft transcription of
+Section 4.2, covered by the Section 11.1 shape/fixed-seed test in
+`tests/`. `export.py` runs end to end (checkpoint -> ONNX -> int8,
+float16 fallback on a failed accuracy check) - verified against
+synthetic data in `models/_smoketest_train_export.py`, not yet against
+a real checkpoint.
