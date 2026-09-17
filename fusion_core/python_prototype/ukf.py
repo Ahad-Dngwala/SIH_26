@@ -391,6 +391,8 @@ class DualChannelUkf:
         road_signature_pos: np.ndarray | None,
         road_signature_confidence: float,
         r_channel_a_override: float | None = None,
+        zupt: bool = False,
+        r_zupt: float = 0.05,
     ) -> UkfState:
         """Advance the filter by one cycle. `gnss_pos`/`gnss_vel` are
         None when GNSS is unavailable this cycle (blackout). Road-
@@ -412,7 +414,13 @@ class DualChannelUkf:
         `physics_speed.PhysicsSpeedChannel`, whose measured R is
         nothing like `FusionConfig.r_channel_a`'s Section 4.2 target.
         It bypasses the Section 5.4 disagreement rule, since that rule
-        is calibrated for Channel A specifically."""
+        is calibrated for Channel A specifically.
+
+        `zupt`: when True, a zero-velocity pseudo-measurement is
+        applied with a tight `r_zupt`. The caller owns the detection
+        decision - see `zupt.ZuptDetector`, and in particular its note
+        on why the detector gates on raw IMU variance rather than on
+        this filter's own speed estimate."""
         c = self.config
         blackout = gnss_pos is None
 
@@ -461,6 +469,18 @@ class DualChannelUkf:
                 [channel_b_speed * np.cos(psi_hat), channel_b_speed * np.sin(psi_hat)]
             )
             self.ukf.update(z_b, R=np.eye(2) * c.r_channel_b**2, hx=hx_velocity)
+            self._symmetrize_p()
+
+        # Zero-velocity update. Applied after the velocity channels so
+        # that a detected stop overrides whatever they claimed - a
+        # drifting integrated-speed channel is exactly the thing this
+        # is here to correct, so letting it have the last word would
+        # defeat the purpose.
+        if zupt:
+            self._refresh_sigmas()
+            self.ukf.update(
+                np.array([0.0, 0.0]), R=np.eye(2) * r_zupt**2, hx=hx_velocity
+            )
             self._symmetrize_p()
 
         # Non-holonomic constraint - see hx_nhc's and

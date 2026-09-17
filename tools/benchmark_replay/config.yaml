@@ -141,3 +141,23 @@ road_signature_confidence_threshold: 0.85
 output:
   plot_path: tools/benchmark_replay/output/latest_run.png
   regression_log_path: tools/benchmark_replay/output/regression_log.csv
+
+# --- ZUPT (zero-velocity update) ------------------------------------------
+# Standard land-vehicle INS: when the IMU says the vehicle is stopped, apply a
+# velocity measurement of (0, 0) with a tight R. Free accuracy at traffic
+# lights, and it stops Channel P's integrator wandering while stationary.
+#
+# Gated on raw IMU variance, never on the filter's own speed estimate - see
+# fusion_core/python_prototype/zupt.py for why that distinction matters.
+#
+# Thresholds below are tuned to the SYNTHETIC IMU noise in route.synthetic
+# above. A real phone in a real idling vehicle is noisier. Re-measure against a
+# recording of the demo vehicle actually stopped before trusting these on
+# hardware, or ZUPT will simply never fire.
+zupt:
+  enabled: false           # see zupt.py - cannot be honestly validated on synthetic IMU
+  window_n: 10              # samples (1.0 s at 10 Hz)
+  accel_var_threshold: 0.02 # (m/s^2)^2
+  gyro_var_threshold: 0.002 # (rad/s)^2
+  accel_magnitude_threshold: 0.3  # m/s^2 - the only gate doing real work on synthetic data
+  r_mps: 0.05               # tight, but not zero - the detector can be wrong

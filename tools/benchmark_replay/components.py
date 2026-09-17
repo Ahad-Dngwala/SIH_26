@@ -291,6 +291,8 @@ class DummyConstantVelocityFusion:
         road_signature: RoadSignatureResult,
         road_signature_threshold: float = 0.85,
         r_channel_a_override: float | None = None,
+        zupt: bool = False,
+        r_zupt: float = 0.05,
     ) -> FusionState:
         heading = state.heading + gyro_yaw * dt
         available = [s for s in (channel_a_speed, channel_b_speed) if s is not None]
@@ -302,6 +304,8 @@ class DummyConstantVelocityFusion:
             # UKF's CTCV process model does in the same situation, so
             # the two fusion cores stay comparable.
             speed = float(np.linalg.norm(state.vel))
+        if zupt:
+            speed = 0.0
         vel = np.array([speed * np.cos(heading), speed * np.sin(heading)])
         pos = state.pos + (state.vel + vel) / 2.0 * dt
 
@@ -358,6 +362,8 @@ class RealUkfFusion:
         road_signature: RoadSignatureResult,
         road_signature_threshold: float = 0.85,
         r_channel_a_override: float | None = None,
+        zupt: bool = False,
+        r_zupt: float = 0.05,
     ) -> FusionState:
         from fusion_core.python_prototype.ukf import UkfState
 
@@ -397,6 +403,8 @@ class RealUkfFusion:
             road_signature_pos=road_signature_pos,
             road_signature_confidence=road_signature.confidence,
             r_channel_a_override=r_channel_a_override,
+            zupt=zupt,
+            r_zupt=r_zupt,
         )
         return FusionState(pos=result.pos, vel=result.vel, heading=result.heading)
 
@@ -467,6 +475,9 @@ class ComponentSet:
     # slot, when that thing is not Channel A itself (i.e. Channel P).
     # None means "use FusionConfig's own Section 5.4 rule".
     channel_a_r_override: float | None = None
+    # None disables ZUPT entirely.
+    zupt_detector: object | None = None
+    r_zupt: float = 0.05
 
 
 def build_components(config: dict) -> ComponentSet:
@@ -568,6 +579,21 @@ def build_components(config: dict) -> ComponentSet:
             beta_transition=mm_cfg.get("beta_transition", 10.0),
         )
 
+    zupt_cfg = config.get("zupt", {})
+    zupt_detector = None
+    if zupt_cfg.get("enabled", False):
+        from fusion_core.python_prototype.zupt import ZuptConfig, ZuptDetector
+
+        zupt_detector = ZuptDetector(
+            ZuptConfig(
+                window_n=zupt_cfg.get("window_n", 10),
+                accel_var_threshold=zupt_cfg.get("accel_var_threshold", 0.02),
+                gyro_var_threshold=zupt_cfg.get("gyro_var_threshold", 0.002),
+                accel_magnitude_threshold=zupt_cfg.get("accel_magnitude_threshold", 0.3),
+                r_mps=zupt_cfg.get("r_mps", 0.05),
+            )
+        )
+
     return ComponentSet(
         channel_a=channel_a,
         channel_b=channel_b,
@@ -576,4 +602,6 @@ def build_components(config: dict) -> ComponentSet:
         map_matching=map_matching,
         road_signature_threshold=threshold,
         channel_a_r_override=channel_a_r_override,
+        zupt_detector=zupt_detector,
+        r_zupt=zupt_cfg.get("r_mps", 0.05),
     )

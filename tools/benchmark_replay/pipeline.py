@@ -99,6 +99,18 @@ def run_fused_pipeline(
 
         gnss_pos = route.pos[i].copy() if route.gnss_available[i] else None
 
+        zupt = False
+        if components.zupt_detector is not None:
+            zupt = components.zupt_detector.update(
+                accel_body=route.accel_body[i - 1], gyro_yaw=route.gyro_yaw[i - 1]
+            )
+            if zupt and hasattr(components.channel_a, "apply_zupt"):
+                # Keep Channel P's integrator in step with the filter -
+                # otherwise it keeps accumulating bias through the stop
+                # and hands the filter a stale speed the moment the
+                # vehicle moves off again.
+                components.channel_a.apply_zupt()
+
         state = components.fusion.step(
             state=state,
             dt=dt,
@@ -110,6 +122,8 @@ def run_fused_pipeline(
             road_signature=road_signature,
             road_signature_threshold=components.road_signature_threshold,
             r_channel_a_override=components.channel_a_r_override,
+            zupt=zupt,
+            r_zupt=components.r_zupt,
         )
         unsnapped[i] = state.pos
         snapped[i] = components.map_matching.snap(state.pos)

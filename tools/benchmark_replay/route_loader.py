@@ -18,6 +18,11 @@ from pathlib import Path
 
 import numpy as np
 
+# Seconds of raised-cosine ramp on each side of a synthetic stop, so
+# the synthesised accelerometer sees a physical deceleration rather
+# than an infinite one.
+_STOP_RAMP_S = 6.0
+
 
 @dataclass
 class Route:
@@ -91,6 +96,7 @@ def _speed_profile(
     speed_mps: float,
     speed_variation_mps: float,
     speed_period_s: float,
+    stop_windows: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (speed, longitudinal_accel) over `t` for a route kind.
 
@@ -112,13 +118,18 @@ def _speed_profile(
     has an analytic derivative, and is zero-mean in acceleration -
     which means it does not secretly help or hurt an integrator the
     way a monotone ramp would.
+
+    `stop_windows` is a list of `[start_s, end_s]` pairs during which
+    the vehicle is stationary - traffic lights. Without at least one,
+    ZUPT has nothing to detect and its contribution cannot be
+    measured. Speed is smoothly ramped into and out of each stop over
+    `_STOP_RAMP_S` so the synthesised accelerometer stays physical.
     """
     if kind in ("straight", "constant_turn"):
         return np.full(len(t), speed_mps), np.zeros(len(t))
 
     omega = 2.0 * np.pi / speed_period_s
     speed = speed_mps + speed_variation_mps * np.sin(omega * t)
-    longitudinal_accel = speed_variation_mps * omega * np.cos(omega * t)
     if np.any(speed <= 0.0):
         raise ValueError(
             f"speed_variation_mps ({speed_variation_mps}) is too large for "
@@ -126,6 +137,24 @@ def _speed_profile(
             "which the CTCV model and the drift metric both assume never "
             "happens."
         )
+
+    for start_s, end_s in stop_windows or []:
+        if end_s <= start_s:
+            raise ValueError(f"stop window [{start_s}, {end_s}] ends before it starts")
+        # Smooth 0/1 gate: 0 inside the stop, 1 outside, raised-cosine
+        # ramps of _STOP_RAMP_S on each side.
+        gate = np.ones(len(t))
+        gate[(t >= start_s) & (t <= end_s)] = 0.0
+        ramp_in = (t >= start_s - _STOP_RAMP_S) & (t < start_s)
+        gate[ramp_in] = 0.5 * (1 + np.cos(np.pi * (t[ramp_in] - (start_s - _STOP_RAMP_S)) / _STOP_RAMP_S))
+        ramp_out = (t > end_s) & (t <= end_s + _STOP_RAMP_S)
+        gate[ramp_out] = 0.5 * (1 - np.cos(np.pi * (t[ramp_out] - end_s) / _STOP_RAMP_S))
+        speed = speed * gate
+
+    # Differentiate numerically rather than analytically, since the
+    # stop gates have no clean closed form. np.gradient is centred and
+    # second-order, which is accurate enough at 10 Hz.
+    longitudinal_accel = np.gradient(speed, t)
     return speed, longitudinal_accel
 
 
@@ -140,6 +169,7 @@ def generate_synthetic_route(
     accel_bias: float = 0.03,
     speed_variation_mps: float = 0.0,
     speed_period_s: float = 40.0,
+    stop_windows: list | None = None,
     seed: int = 0,
 ) -> Route:
     """Build a synthetic route, either straight, constant-turn-rate, or
@@ -154,8 +184,9 @@ def generate_synthetic_route(
     good and defeat the point of the comparison.
 
     `kind="varying_speed"` uses `speed_variation_mps` / `speed_period_s`
-    to modulate speed around `speed_mps` - see `_speed_profile` for why
-    that kind exists and when it must be used.
+    to modulate speed around `speed_mps`, and `stop_windows` to insert
+    stationary periods - see `_speed_profile` for why that kind exists,
+    when it must be used, and why ZUPT needs the stops.
     """
     if kind not in ("straight", "constant_turn", "varying_speed"):
         raise ValueError(f"Unknown synthetic route kind: {kind!r}")
@@ -176,7 +207,7 @@ def generate_synthetic_route(
     heading = turn_rate_rps * t  # rad, starts at 0
 
     speed, longitudinal_accel = _speed_profile(
-        kind, t, speed_mps, speed_variation_mps, speed_period_s
+        kind, t, speed_mps, speed_variation_mps, speed_period_s, stop_windows
     )
 
     # Ground-truth world-frame velocity and position.

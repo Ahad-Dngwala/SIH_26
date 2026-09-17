@@ -143,6 +143,65 @@ entirely on the caller's own GNSS-availability signal (`gnss_pos is
 None`), which is fine for offline replay but not what Section 7.3's
 on-device runtime loop will have.
 
+**ZUPT - implemented, measured, defaults off, and here is why.**
+Zero-velocity updates (`zupt.py`) are standard land-vehicle INS: when
+the IMU says the vehicle is stopped, apply a velocity measurement of
+(0, 0). The detector gates on raw IMU only, never on the filter's own
+speed estimate, because gating on the estimate is self-confirming - a
+vehicle genuinely moving at 3 m/s can be pinned to a standstill by its
+own belief. A test asserts the detector's signature cannot grow a
+speed argument.
+
+Two independent reasons it is off by default, both measured:
+
+*1. It cannot be validated on synthetic data.* An accelerometer cannot
+distinguish rest from constant velocity - Galilean invariance, not a
+tuning problem. Real ZUPT survives this because a parked vehicle has a
+different *vibration signature* from a moving one. The benchmark's
+synthetic IMU is ground truth plus fixed-variance white noise, so its
+variance is identical parked or cruising: measured, stopped gives accel
+variance 0.0014 / gyro 0.00013, cruising gives 0.0025 / 0.00009 - the
+gyro variance is *lower* while moving. A variance-only detector fired
+continuously and drove drift from 3.91% to 59.70%. Adding a horizontal
+specific-force magnitude gate fixes the false positives on the
+synthetic route (no-stop route: 0.00 pp change), but that gate works
+only because cornering and accelerating produce specific force; it
+still cannot catch straight-line constant-speed cruise.
+
+*2. On a route with a real stop, it helps during the stop and hurts by
+the end.* On `varying_speed` with a 15 s stop inside the blackout, and
+Channel P active:
+
+| t | position error, ZUPT off | ZUPT on |
+|---|---|---|
+| 55 s (stop begins) | 3.57 m | 3.57 m |
+| 70 s (stop ends) | 13.17 m | **3.42 m** |
+| 85 s | 43.07 m | 59.17 m |
+| 100 s (blackout ends) | **84.72 m** | 157.56 m |
+
+The detector does exactly its job - it fires over 55.9-70.3 s against a
+true stop of 55-70 s, and holds position error to a quarter of the
+ZUPT-off value through the stop. The damage is all in the move-off
+recovery: Channel P's speed estimate lags (6.57 vs 10.10 m/s true at
+t=74 s) and the filter is slow to accept it. Loosening `r_zupt` helps
+monotonically (21.90% -> 13.66% as r goes 0.05 -> 2.0), which points at
+velocity-covariance collapse under the tight ZUPT R, but even the
+loosest value stays worse than ZUPT off (11.77%).
+
+**This is an open item, not a closed one.** It is very likely fixable -
+re-inflating velocity covariance on ZUPT release is the obvious next
+thing to try - and it was left unfixed only because of the time budget
+before the presentation. Do not present ZUPT as working. The
+during-stop numbers are real and worth showing; the end-of-blackout
+regression is real too and belongs on the same slide.
+
+Worth noting separately: the fact that ZUPT can improve position error
+at every point through the stop and still lose on the end-of-blackout
+metric is a property of the *metric*, which samples error at a single
+instant and therefore rewards errors that happen to cancel. `drift.py`
+already carries a warning that its formula is unconfirmed against
+PS 26168; this is a concrete reason to confirm it.
+
 **Considered, implemented, and measured - defaults off, and here's
 why:** a non-holonomic-constraint (NHC) pseudo-measurement
 (`vy_body ≈ 0`, since a car/bike doesn't slide sideways) is a
