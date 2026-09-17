@@ -341,13 +341,26 @@ class RealUkfFusion:
     keep internal state).
     """
 
-    def __init__(self, road_signature_confidence_threshold: float = 0.85) -> None:
+    def __init__(
+        self,
+        road_signature_confidence_threshold: float = 0.85,
+        enable_nhc: bool | None = None,
+        r_nhc: float | None = None,
+    ) -> None:
         from fusion_core.python_prototype.ukf import DualChannelUkf, FusionConfig
 
         self._DualChannelUkf = DualChannelUkf
         self._config = FusionConfig(
             road_signature_confidence_threshold=road_signature_confidence_threshold
         )
+        # NHC is a per-configuration preset, never a library default -
+        # see FusionConfig.enable_nhc. Whether it helps depends entirely
+        # on whether some other update is already asserting zero lateral
+        # velocity every cycle.
+        if enable_nhc is not None:
+            self._config.enable_nhc = enable_nhc
+        if r_nhc is not None:
+            self._config.r_nhc = r_nhc
         self._ukf = None
 
     def step(
@@ -563,10 +576,15 @@ def build_components(config: dict) -> ComponentSet:
         if which["road_signature"] == "dummy"
         else RealRoadSignatureEstimator()
     )
+    nhc_cfg = config.get("nhc", {})
     fusion = (
         DummyConstantVelocityFusion()
         if which["fusion"] == "dummy"
-        else RealUkfFusion(road_signature_confidence_threshold=threshold)
+        else RealUkfFusion(
+            road_signature_confidence_threshold=threshold,
+            enable_nhc=nhc_cfg.get("enabled"),
+            r_nhc=nhc_cfg.get("r_nhc"),
+        )
     )
     if which["map_matching"] == "dummy":
         map_matching = DummyMapMatcher()

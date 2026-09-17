@@ -161,3 +161,23 @@ zupt:
   gyro_var_threshold: 0.002 # (rad/s)^2
   accel_magnitude_threshold: 0.3  # m/s^2 - the only gate doing real work on synthetic data
   r_mps: 0.05               # tight, but not zero - the detector can be wrong
+
+# --- NHC (non-holonomic constraint) ---------------------------------------
+# "A car doesn't slide sideways", applied as a lateral-velocity-is-zero
+# pseudo-measurement. This is a PRESET, not a library default: FusionConfig
+# keeps enable_nhc=False and a unit test guards that, because whether NHC helps
+# depends entirely on the rest of the update sequence.
+#
+# The rule, measured (see fusion_core/python_prototype/README.md for the table):
+#   - If ANY velocity channel is active, NHC is redundant and mildly harmful.
+#     Channel A/B/P all rotate a scalar speed into (vn, ve) using the current
+#     heading, which already asserts zero lateral velocity every single cycle.
+#   - If NO velocity channel is active, nothing else asserts it, NHC becomes
+#     the only lateral constraint in the filter, and it helps a lot: 6.78% ->
+#     2.51% on constant_turn, 10.35% -> 8.00% on varying_speed.
+#
+# So: turn this ON exactly when channel_a and channel_b are both `none`, which
+# is the configuration the phone is actually in today.
+nhc:
+  enabled: false   # set true when channel_a AND channel_b are both `none`
+  r_nhc: 0.1       # m/s, 1-sigma. Tighter is better in the no-channel case.

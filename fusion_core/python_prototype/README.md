@@ -210,10 +210,56 @@ states, since `vy_body` is already a deterministic rotation of the
 existing `vn, ve, psi`, so it's implemented as a 5th sequential update
 source (`hx_nhc`), not a state-vector expansion.
 
-It's implemented and unit-tested (`enable_nhc` in `FusionConfig`), but
-**defaults to `False`** because enabling it measurably hurts on the
-one benchmark available, not helps. Ablation on the benchmark tool's
-default synthetic constant-turn scenario, production RNG:
+It's implemented and unit-tested (`enable_nhc` in `FusionConfig`), and
+**still defaults to `False`** - but the reason has changed, and the
+reversal is the interesting part.
+
+**Original ablation (Channel A/B active, the only configuration that
+existed at the time):** NHC never beat the baseline and hurt more the
+more tightly it was trusted. Root cause, documented at the time and
+still correct: Channel A/B rotate their scalar speed into `(vn, ve)`
+using the *current heading estimate*, which already asserts zero
+lateral velocity every cycle. NHC asserted the same fact a second time,
+added no information, and just perturbed the covariance math.
+
+That write-up also predicted the condition under which the verdict
+would flip - if the channels stopped pre-rotating, the two constraints
+would become genuinely orthogonal. The honest phone configuration
+removes the channels entirely, which is a stronger version of the same
+condition. **Re-run across all three configurations and both route
+kinds, drift %:**
+
+| route | velocity channels | NHC off | r=0.1 | r=0.3 | r=1.0 | r=3.0 |
+|---|---|---|---|---|---|---|
+| constant_turn | none | 6.78 | **2.51** | 3.25 | 5.08 | 6.34 |
+| constant_turn | Channel P | 4.13 | 4.18 | 4.16 | 4.14 | 4.13 |
+| constant_turn | dummy A+B | 1.48 | 1.85 | 1.65 | 1.50 | 1.49 |
+| varying_speed | none | 10.35 | **8.00** | 8.44 | 9.46 | 10.13 |
+| varying_speed | Channel P | 3.91 | 4.05 | 3.96 | 3.91 | 3.91 |
+| varying_speed | dummy A+B | 1.59 | 2.16 | 1.82 | 1.61 | 1.59 |
+
+The prediction held exactly. With no velocity channel, NHC becomes the
+*only* lateral constraint in the filter and cuts drift by 63% on
+constant_turn and 23% on varying_speed - and now tighter trust is
+*better*, the reverse of the original ablation's ordering, which is the
+signature of a constraint that has become informative rather than
+redundant. With Channel P active it goes back to being redundant and
+mildly harmful, because Channel P feeds through the same `hx_velocity`
+rotation Channel A/B do. The dummy A+B rows reproduce the original
+numbers, so nothing about the first ablation was wrong - it was
+correct, for its configuration.
+
+**This is expressed as a config preset, not a default change.**
+`FusionConfig.enable_nhc` stays `False` and
+`tests/test_ukf.py::test_nhc_disabled_by_default` still guards it. Turn
+it on via `nhc.enabled` in the benchmark tool's `config.yaml`, and turn
+it on exactly when `channel_a` and `channel_b` are both `none`. Flipping
+the library default would be wrong: it would silently degrade every
+configuration that has a working velocity channel, which is the
+configuration the project is trying to reach.
+
+Ablation on the benchmark tool's default synthetic constant-turn
+scenario, production RNG, for the original Channel A/B configuration:
 
 | enable_nhc | r_nhc | drift |
 |---|---|---|
