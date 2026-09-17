@@ -109,6 +109,7 @@ def run_fused_pipeline(
             gnss_pos=gnss_pos,
             road_signature=road_signature,
             road_signature_threshold=components.road_signature_threshold,
+            r_channel_a_override=components.channel_a_r_override,
         )
         unsnapped[i] = state.pos
         snapped[i] = components.map_matching.snap(state.pos)

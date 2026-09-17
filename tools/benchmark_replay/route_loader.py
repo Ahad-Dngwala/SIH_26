@@ -85,6 +85,50 @@ class Route:
         return chunk.astype(np.float32)
 
 
+def _speed_profile(
+    kind: str,
+    t: np.ndarray,
+    speed_mps: float,
+    speed_variation_mps: float,
+    speed_period_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (speed, longitudinal_accel) over `t` for a route kind.
+
+    `straight` and `constant_turn` are flat: speed is constant and
+    longitudinal acceleration is exactly zero.
+
+    `varying_speed` adds a smooth sinusoidal speed profile. This kind
+    exists because the two constant-speed kinds cannot discriminate a
+    velocity channel *at all*: `ukf.fx` is a constant-speed coast
+    model, so on a constant-speed route the coast is already exactly
+    correct and any velocity channel - learned or physical - can only
+    add noise to a perfect answer. Benchmarking a velocity channel on
+    a constant-speed route measures nothing useful and will make a
+    working channel look harmful. Use this kind whenever the thing
+    under test is a velocity source.
+
+    A sinusoid rather than a step or a random walk because it is
+    smooth (no unphysical jerk for the IMU synthesis to represent),
+    has an analytic derivative, and is zero-mean in acceleration -
+    which means it does not secretly help or hurt an integrator the
+    way a monotone ramp would.
+    """
+    if kind in ("straight", "constant_turn"):
+        return np.full(len(t), speed_mps), np.zeros(len(t))
+
+    omega = 2.0 * np.pi / speed_period_s
+    speed = speed_mps + speed_variation_mps * np.sin(omega * t)
+    longitudinal_accel = speed_variation_mps * omega * np.cos(omega * t)
+    if np.any(speed <= 0.0):
+        raise ValueError(
+            f"speed_variation_mps ({speed_variation_mps}) is too large for "
+            f"speed_mps ({speed_mps}) - the profile would reverse direction, "
+            "which the CTCV model and the drift metric both assume never "
+            "happens."
+        )
+    return speed, longitudinal_accel
+
+
 def generate_synthetic_route(
     kind: str = "constant_turn",
     duration_s: float = 120.0,
@@ -94,37 +138,58 @@ def generate_synthetic_route(
     accel_noise_std: float = 0.05,
     gyro_noise_std: float = 0.01,
     accel_bias: float = 0.03,
+    speed_variation_mps: float = 0.0,
+    speed_period_s: float = 40.0,
     seed: int = 0,
 ) -> Route:
-    """Build a synthetic route at constant speed, either straight or
-    constant-turn-rate, with synthetic body-frame IMU derived from the
-    ground-truth motion plus noise and a constant accelerometer bias.
+    """Build a synthetic route, either straight, constant-turn-rate, or
+    constant-turn-rate with a varying speed profile, with synthetic
+    body-frame IMU derived from the ground-truth motion plus noise and
+    a constant accelerometer bias.
 
     The accelerometer bias is deliberate, not an oversight: it's what
     makes the raw double-integration baseline in pipeline.py actually
     drift (see HLD/main.tex Section 1 - "quadratic-in-time error
     term"). Zero bias would make the naive baseline look artificially
     good and defeat the point of the comparison.
+
+    `kind="varying_speed"` uses `speed_variation_mps` / `speed_period_s`
+    to modulate speed around `speed_mps` - see `_speed_profile` for why
+    that kind exists and when it must be used.
     """
-    if kind not in ("straight", "constant_turn"):
+    if kind not in ("straight", "constant_turn", "varying_speed"):
         raise ValueError(f"Unknown synthetic route kind: {kind!r}")
+    if kind == "varying_speed" and speed_variation_mps <= 0.0:
+        raise ValueError(
+            "kind='varying_speed' with speed_variation_mps <= 0 is just a "
+            "constant-speed route under a misleading name - set a positive "
+            "speed_variation_mps or use kind='constant_turn'."
+        )
 
     rng = np.random.default_rng(seed)
     n = int(round(duration_s / dt_s)) + 1
     t = np.arange(n) * dt_s
 
-    turn_rate_rps = np.deg2rad(turn_rate_dps) if kind == "constant_turn" else 0.0
+    turn_rate_rps = (
+        np.deg2rad(turn_rate_dps) if kind in ("constant_turn", "varying_speed") else 0.0
+    )
     heading = turn_rate_rps * t  # rad, starts at 0
 
-    # Ground-truth world-frame velocity and position (constant speed).
-    vel = np.stack([speed_mps * np.cos(heading), speed_mps * np.sin(heading)], axis=1)
+    speed, longitudinal_accel = _speed_profile(
+        kind, t, speed_mps, speed_variation_mps, speed_period_s
+    )
+
+    # Ground-truth world-frame velocity and position.
+    vel = np.stack([speed * np.cos(heading), speed * np.sin(heading)], axis=1)
     pos = np.zeros((n, 2))
     pos[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt_s, axis=0)
 
-    # Body-frame ground truth is trivial at constant speed: forward
-    # accel is ~0, lateral accel comes from the turn (v * yaw_rate).
+    # Body-frame ground truth: forward accel is the speed profile's
+    # derivative (zero for the constant-speed kinds), lateral accel
+    # comes from the turn (v * yaw_rate).
     accel_body_true = np.zeros((n, 2))
-    accel_body_true[:, 1] = speed_mps * turn_rate_rps  # lateral accel, m/s^2
+    accel_body_true[:, 0] = longitudinal_accel  # forward accel, m/s^2
+    accel_body_true[:, 1] = speed * turn_rate_rps  # lateral accel, m/s^2
     gyro_yaw_true = np.full(n, turn_rate_rps)
 
     accel_body = (

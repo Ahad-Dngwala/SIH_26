@@ -39,6 +39,8 @@ route:
     accel_noise_std: 0.05     # m/s^2, additive noise on synthetic accelerometer
     gyro_noise_std: 0.01      # rad/s, additive noise on synthetic gyro
     accel_bias: 0.03          # m/s^2, constant bias - this is what makes raw double-integration blow up
+    speed_variation_mps: 0.0  # only used when kind: varying_speed - sinusoid amplitude around speed_mps
+    speed_period_s: 40.0      # only used when kind: varying_speed - sinusoid period
     seed: 0
   io_vnbd:
     processed_path: null      # e.g. data/processed/benchmark_replay/route_001.npz - fill in once Layer 1 delivers
@@ -62,11 +64,39 @@ blackout:
 #   2. Fill in the channel_a and channel_b sections below with correct paths
 #   3. Update the r_channel_a / r_channel_b overrides to the measured RMSE
 components:
-  channel_a: dummy          # dummy | real  (no export exists - see header)
-  channel_b: dummy          # dummy | real  (no export exists - see header)
+  channel_a: dummy          # none | dummy | physics | real
+  channel_b: dummy          # none | dummy | real
   road_signature: dummy     # dummy | real  (real needs road_signature model, Phase 5)
   fusion: real              # dummy | real  (real = fusion_core/python_prototype/ukf.py)
   map_matching: dummy       # dummy | real  (real = HMM/Viterbi, Phase 5)
+
+# What each channel switch means:
+#   none     - this channel contributes nothing, ever. `channel_a: none` plus
+#              `channel_b: none` is the honest "what the phone does today"
+#              baseline: no trained velocity model exists, so the UKF coasts on
+#              its CTCV process model through a blackout. Report every other
+#              number against this one.
+#   dummy    - noised ground-truth velocity. Better information than any real
+#              system will ever have. Useful for isolating the UKF's own math
+#              quality; useless as a system accuracy figure.
+#   physics  - Channel P, fusion_core/python_prototype/physics_speed.py. A
+#              classical integrate-accel-and-reseed-from-GNSS estimator, no ML,
+#              no training, no dataset. Occupies Channel A's update slot without
+#              being Channel A.
+#   real     - the trained ONNX model. Does not exist for either channel.
+
+# --- Channel P (physics forward-speed estimator) --------------------------
+# Used when components.channel_a is 'physics'.
+# r_mps is MEASURED, not targeted: run
+#   python -m tools.measure_physics_channel_r --kind varying_speed
+# and use the RMSE it reports. Do not copy r_channel_a's 0.5 here - that is
+# MIP Section 4.2's target for a trained model and has never been met.
+channel_p:
+  r_mps: 1.13              # measured blackout-window RMSE on the varying_speed route
+  max_speed_mps: 70.0
+  leak_tau_s: 0.0          # 0 disables the leak toward last GNSS speed
+  gnss_speed_noise_std: 0.3  # matches FusionConfig.r_gnss_vel
+  seed: 3
 
 # --- Real component configuration (used when above switches are 'real') ---
 # Channel A ONNX velocity estimator (MIP Section 4.2, Phase 2)

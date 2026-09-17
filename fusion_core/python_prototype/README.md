@@ -41,6 +41,59 @@ diag(P) ~2e16, 1.0 stays at ~6e4. See `FusionConfig.alpha`'s comment.
 The change moves the dummy-channel benchmark number by 0.003 pp
 (1.486% -> 1.483%), so nothing previously reported depended on it.
 
+**Channel P - the physics forward-speed channel
+(`physics_speed.py`).** `fx` is a CTCV model: it holds speed magnitude
+constant across the prediction step and only rotates it into the new
+gyro-propagated heading. It never integrates accelerometer. Every
+velocity *change* therefore has to arrive through a measurement update.
+With no trained Channel A or Channel B - this repo's actual state - the
+filter has zero velocity evidence during a blackout and simply coasts.
+Channel P is a classical, untrained estimator that occupies Channel A's
+update slot: level the accelerometer, take the longitudinal component,
+integrate to a scalar forward speed, reseed from GNSS speed whenever
+GNSS is available. No model, no dataset, no training.
+
+Measured on the benchmark tool's synthetic routes
+(`python -m tools.benchmark_replay.compare_configs`):
+
+| Configuration | constant_turn | varying_speed |
+|---|---|---|
+| no velocity channel (phone today) | 6.78% | 10.35% |
+| Channel P only | 4.13% | 3.91% |
+| dummy A+B (noised ground truth) | 1.48% | 1.58% |
+
+Channel P roughly halves blackout drift on a constant-speed route and
+cuts it by about 62% on a speed-varying one, which is the acceptance
+bar from the implementation plan, met on both routes.
+
+Three things about that table that need saying out loud:
+
+1. **The `varying_speed` route kind was added for this.** The two
+   pre-existing route kinds are constant-speed, and `fx` is a
+   constant-speed coast model, so on those routes the coast is already
+   nearly correct and a velocity channel has almost nothing to
+   contribute. Benchmarking a velocity source there understates it
+   badly. Any future velocity channel - including a retrained Channel
+   A - should be judged on `varying_speed`.
+2. **`dummy A+B` is not an achievable target.** It is noised ground
+   truth. It is the ceiling the UKF's own math imposes given perfect
+   velocity input, and nothing else.
+3. **Channel P's R is measured, not targeted.** 1.13 m/s, from
+   `python -m tools.measure_physics_channel_r --kind varying_speed`,
+   which reports the RMSE of its speed estimate against ground truth
+   during the blackout window only. Bias is +0.97 m/s and the error
+   reaches +1.90 m/s by the end of a 60 s blackout, because this is an
+   open-loop integration of a biased accelerometer and drifts by
+   construction. That also means the error is strongly autocorrelated
+   rather than white, so this R is a pragmatic proxy for a sigma, not a
+   statistically clean one. `FusionConfig.r_channel_a = 0.5` remains
+   MIP Section 4.2's aspiration and has never been met by anything.
+
+Channel P is deliberately *not* named Channel A and does not overwrite
+Channel A's slot design - `config.yaml`'s `components.channel_a` now
+takes `none | dummy | physics | real`, and `real` still means the
+trained ONNX model whenever one exists.
+
 Status: **first working version built (`ukf.py`)**, using filterpy's
 `UnscentedKalmanFilter` with a custom CTCV `fx` and four separate `hx`
 functions (position, position+velocity, velocity-only), applied as

@@ -1,0 +1,157 @@
+"""Tests for Channel P (`physics_speed.py`).
+
+The leveling front-end is tested here rather than through the benchmark
+because the benchmark's synthetic routes carry a 2-axis, already
+gravity-free `accel_body` and therefore cannot exercise it at all.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from fusion_core.python_prototype.physics_speed import (
+    GRAVITY_MPS2,
+    MountLeveling,
+    PhysicsSpeedChannel,
+    PhysicsSpeedConfig,
+    estimate_forward_axis,
+)
+
+
+# --- leveling front-end -------------------------------------------------------
+
+
+def _rotation_from_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
+    axis = axis / np.linalg.norm(axis)
+    k = np.array(
+        [
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ]
+    )
+    return np.eye(3) + np.sin(angle) * k + (1 - np.cos(angle)) * (k @ k)
+
+
+def test_leveling_recovers_gravity_from_a_tilted_mount():
+    """A phone sitting at an arbitrary tilt should still resolve which
+    way is up to within a degree."""
+    rng = np.random.default_rng(0)
+    tilt = _rotation_from_axis_angle(np.array([0.3, 0.8, 0.1]), np.deg2rad(35.0))
+    up_world = np.array([0.0, 0.0, 1.0])
+    stationary = (tilt @ (up_world * GRAVITY_MPS2))[None, :] + rng.normal(
+        0.0, 0.02, size=(200, 3)
+    )
+
+    leveling = MountLeveling.from_stationary_window(stationary)
+
+    assert leveling.gravity_magnitude == pytest.approx(GRAVITY_MPS2, abs=0.05)
+    recovered_up = leveling.rotation @ (tilt @ up_world)
+    angle_error = np.degrees(np.arccos(np.clip(recovered_up[2], -1.0, 1.0)))
+    assert angle_error < 1.0, f"leveling off by {angle_error:.2f} degrees"
+
+
+def test_leveling_rejects_a_non_stationary_window():
+    """Handing it a gravity-compensated or moving window should fail
+    loudly rather than silently produce a garbage rotation."""
+    with pytest.raises(ValueError, match="plausible gravity magnitude"):
+        MountLeveling.from_stationary_window(np.zeros((50, 3)))
+
+
+def test_forward_axis_finds_the_longitudinal_direction():
+    """Accelerate/brake events dominate horizontal acceleration
+    variance and lie along the vehicle's forward axis."""
+    rng = np.random.default_rng(1)
+    true_axis = np.array([np.cos(0.7), np.sin(0.7)])
+    magnitudes = rng.normal(0.0, 1.5, size=400)
+    horizontal = magnitudes[:, None] * true_axis + rng.normal(0.0, 0.1, size=(400, 2))
+
+    axis = estimate_forward_axis(horizontal, reference_speed_delta=magnitudes)
+
+    assert abs(float(np.dot(axis, true_axis)) - 1.0) < 0.02
+
+
+def test_forward_axis_sign_follows_the_speed_reference():
+    """PCA gives an axis, not a direction. With a speed reference the
+    sign must point the way the vehicle actually accelerates."""
+    rng = np.random.default_rng(2)
+    true_axis = np.array([1.0, 0.0])
+    magnitudes = rng.normal(0.0, 1.5, size=400)
+    horizontal = magnitudes[:, None] * true_axis + rng.normal(0.0, 0.05, size=(400, 2))
+
+    forward = estimate_forward_axis(horizontal, reference_speed_delta=magnitudes)
+    backward = estimate_forward_axis(horizontal, reference_speed_delta=-magnitudes)
+
+    assert float(np.dot(forward, backward)) < -0.9
+
+
+# --- the channel itself -------------------------------------------------------
+
+
+def test_channel_returns_none_before_the_first_gnss_reseed():
+    """Before any GNSS fix the channel has no absolute reference. It
+    must say so rather than fabricate a starting speed - a fabricated
+    zero would brake the filter on every cycle."""
+    channel = PhysicsSpeedChannel()
+    for _ in range(50):
+        assert channel.update(dt=0.1, longitudinal_accel=0.4) is None
+
+
+def test_channel_tracks_a_known_acceleration_after_reseed():
+    channel = PhysicsSpeedChannel()
+    channel.reseed(10.0)
+    for _ in range(100):  # 10 s at 1.0 m/s^2
+        channel.update(dt=0.1, longitudinal_accel=1.0)
+    assert channel.speed == pytest.approx(20.0, abs=0.2)
+
+
+def test_gnss_reseed_clears_accumulated_integration_error():
+    """The whole reason this channel is usable is that its open-loop
+    integration only ever runs for the length of one blackout."""
+    channel = PhysicsSpeedChannel()
+    channel.reseed(16.7)
+    for _ in range(600):  # 60 s of pure bias, no GNSS
+        channel.update(dt=0.1, longitudinal_accel=0.03)
+    drifted = channel.speed
+    assert drifted > 18.0, "a 0.03 m/s^2 bias over 60 s should visibly drift"
+
+    channel.update(dt=0.1, longitudinal_accel=0.03, gnss_speed=16.7)
+    assert channel.speed == pytest.approx(16.7, abs=1e-6)
+
+
+def test_speed_is_clamped_to_physical_bounds():
+    channel = PhysicsSpeedChannel(PhysicsSpeedConfig(max_speed_mps=30.0))
+    channel.reseed(20.0)
+    for _ in range(200):
+        channel.update(dt=0.1, longitudinal_accel=5.0)
+    assert channel.speed == pytest.approx(30.0)
+
+    for _ in range(200):
+        channel.update(dt=0.1, longitudinal_accel=-5.0)
+    assert channel.speed == pytest.approx(0.0)
+
+
+def test_zupt_zeroes_the_integrated_speed():
+    channel = PhysicsSpeedChannel()
+    channel.reseed(12.0)
+    assert channel.apply_zupt() == 0.0
+    assert channel.speed == 0.0
+
+
+def test_leak_pulls_toward_the_last_gnss_speed():
+    """The leak is off by default; when on, it bounds how far an
+    integrated bias can run away, at the cost of being wrong during
+    genuine sustained acceleration. Both halves are the point."""
+    config = PhysicsSpeedConfig(leak_tau_s=5.0)
+    leaky = PhysicsSpeedChannel(config)
+    plain = PhysicsSpeedChannel()
+    leaky.reseed(16.7)
+    plain.reseed(16.7)
+
+    for _ in range(600):
+        leaky.update(dt=0.1, longitudinal_accel=0.03)
+        plain.update(dt=0.1, longitudinal_accel=0.03)
+
+    assert leaky.speed < plain.speed
+    assert abs(leaky.speed - 16.7) < abs(plain.speed - 16.7)

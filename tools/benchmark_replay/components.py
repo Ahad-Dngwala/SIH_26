@@ -23,9 +23,31 @@ import numpy as np
 
 
 class VelocityEstimator(Protocol):
-    def estimate(self, route, i: int) -> float:
-        """Forward speed estimate (m/s) at route index i."""
+    def estimate(self, route, i: int) -> float | None:
+        """Forward speed estimate (m/s) at route index i, or None when
+        this estimator has nothing to offer on this cycle. None means
+        "skip this channel's update", not "zero speed" - the fusion
+        core must not treat the two the same."""
         ...
+
+
+@dataclass
+class NoVelocityEstimator:
+    """Returns None on every cycle - this channel contributes nothing,
+    ever.
+
+    This is not a degenerate case to be avoided; it is the honest
+    configuration of this repo. Neither Channel A nor Channel B has a
+    usable trained model (see `models/README.md`), so `channel_a: none`
+    plus `channel_b: none` is literally what the phone does today, and
+    is the baseline every other configuration's drift number should be
+    reported against. `DummyVelocityEstimator` is *not* that baseline -
+    it feeds noised ground truth, which is better information than any
+    real system will ever have.
+    """
+
+    def estimate(self, route, i: int) -> float | None:
+        return None
 
 
 @dataclass
@@ -99,6 +121,74 @@ class RealVelocityEstimator:
     def reset(self) -> None:
         """Reset the running velocity accumulator (call at route start)."""
         self._v_running = 0.0
+
+
+class PhysicsSpeedEstimator:
+    """Channel P - `fusion_core/python_prototype/physics_speed.py`
+    behind this module's VelocityEstimator protocol.
+
+    Integrates the route's body-frame longitudinal acceleration into a
+    forward speed, reseeding from GNSS speed on every cycle GNSS is
+    available. Returns None before the first reseed.
+
+    Two honesty notes about how this reads the synthetic route:
+
+    * The route's `accel_body` is already a gravity-free, 2-axis
+      body-frame signal, so `physics_speed`'s leveling front-end
+      (`MountLeveling` / `estimate_forward_axis`) has nothing to do
+      here and is bypassed. That front-end is what a real phone needs
+      and it is unit-tested separately; a synthetic route cannot
+      exercise it, and faking a gravity vector into the route
+      generator purely to light it up would be testing the fake.
+      Treat this estimator's numbers as an upper bound on what the
+      channel does on a phone, not a like-for-like.
+    * GNSS speed reseeds are drawn from ground-truth speed plus
+      Gaussian noise at `gnss_speed_noise_std`, matching
+      `FusionConfig.r_gnss_vel`. Reseeding from noiseless ground truth
+      would quietly hand the channel better information than a GNSS
+      receiver provides.
+    """
+
+    def __init__(
+        self,
+        r_mps: float = 2.0,
+        max_speed_mps: float = 70.0,
+        leak_tau_s: float = 0.0,
+        gnss_speed_noise_std: float = 0.3,
+        seed: int = 3,
+    ) -> None:
+        from fusion_core.python_prototype.physics_speed import (
+            PhysicsSpeedChannel,
+            PhysicsSpeedConfig,
+        )
+
+        self.r_mps = r_mps
+        self._channel = PhysicsSpeedChannel(
+            PhysicsSpeedConfig(
+                r_mps=r_mps, max_speed_mps=max_speed_mps, leak_tau_s=leak_tau_s
+            )
+        )
+        self._gnss_speed_noise_std = gnss_speed_noise_std
+        self._rng = np.random.default_rng(seed)
+
+    def estimate(self, route, i: int) -> float | None:
+        dt = float(route.t[i] - route.t[i - 1]) if i > 0 else route.dt_s
+        longitudinal_accel = float(route.accel_body[i - 1][0]) if i > 0 else 0.0
+
+        gnss_speed = None
+        if route.gnss_available[i]:
+            true_speed = float(np.linalg.norm(route.vel[i]))
+            gnss_speed = true_speed + self._rng.normal(0.0, self._gnss_speed_noise_std)
+
+        return self._channel.update(
+            dt=dt, longitudinal_accel=longitudinal_accel, gnss_speed=gnss_speed
+        )
+
+    def apply_zupt(self) -> float:
+        return self._channel.apply_zupt()
+
+    def reset(self) -> None:
+        self._channel.reset()
 
 
 # --- Road-signature drift-anchor classifier ---------------------------------
@@ -195,14 +285,23 @@ class DummyConstantVelocityFusion:
         dt: float,
         accel_body: np.ndarray,
         gyro_yaw: float,
-        channel_a_speed: float,
-        channel_b_speed: float,
+        channel_a_speed: float | None,
+        channel_b_speed: float | None,
         gnss_pos: np.ndarray | None,
         road_signature: RoadSignatureResult,
         road_signature_threshold: float = 0.85,
+        r_channel_a_override: float | None = None,
     ) -> FusionState:
         heading = state.heading + gyro_yaw * dt
-        speed = (channel_a_speed + channel_b_speed) / 2.0
+        available = [s for s in (channel_a_speed, channel_b_speed) if s is not None]
+        if available:
+            speed = sum(available) / len(available)
+        else:
+            # No velocity evidence: hold the previous speed magnitude
+            # and rotate it into the new heading. Mirrors what the real
+            # UKF's CTCV process model does in the same situation, so
+            # the two fusion cores stay comparable.
+            speed = float(np.linalg.norm(state.vel))
         vel = np.array([speed * np.cos(heading), speed * np.sin(heading)])
         pos = state.pos + (state.vel + vel) / 2.0 * dt
 
@@ -253,11 +352,12 @@ class RealUkfFusion:
         dt: float,
         accel_body: np.ndarray,
         gyro_yaw: float,
-        channel_a_speed: float,
-        channel_b_speed: float,
+        channel_a_speed: float | None,
+        channel_b_speed: float | None,
         gnss_pos: np.ndarray | None,
         road_signature: RoadSignatureResult,
         road_signature_threshold: float = 0.85,
+        r_channel_a_override: float | None = None,
     ) -> FusionState:
         from fusion_core.python_prototype.ukf import UkfState
 
@@ -296,6 +396,7 @@ class RealUkfFusion:
             gnss_vel=None,  # benchmark tool's Route has no GNSS-velocity channel (route_loader.py)
             road_signature_pos=road_signature_pos,
             road_signature_confidence=road_signature.confidence,
+            r_channel_a_override=r_channel_a_override,
         )
         return FusionState(pos=result.pos, vel=result.vel, heading=result.heading)
 
@@ -362,6 +463,10 @@ class ComponentSet:
     fusion: FusionCore
     map_matching: MapMatcher
     road_signature_threshold: float
+    # Per-cycle 1-sigma to use for whatever occupies Channel A's update
+    # slot, when that thing is not Channel A itself (i.e. Channel P).
+    # None means "use FusionConfig's own Section 5.4 rule".
+    channel_a_r_override: float | None = None
 
 
 def build_components(config: dict) -> ComponentSet:
@@ -400,7 +505,23 @@ def build_components(config: dict) -> ComponentSet:
     which = config["components"]
     threshold = config.get("road_signature_confidence_threshold", 0.85)
 
-    if which["channel_a"] == "dummy":
+    channel_a_r_override: float | None = None
+
+    if which["channel_a"] == "none":
+        channel_a = NoVelocityEstimator()
+    elif which["channel_a"] == "physics":
+        cp_cfg = config.get("channel_p", {})
+        channel_a = PhysicsSpeedEstimator(
+            r_mps=cp_cfg.get("r_mps", 2.0),
+            max_speed_mps=cp_cfg.get("max_speed_mps", 70.0),
+            leak_tau_s=cp_cfg.get("leak_tau_s", 0.0),
+            gnss_speed_noise_std=cp_cfg.get("gnss_speed_noise_std", 0.3),
+            seed=cp_cfg.get("seed", 3),
+        )
+        # Channel P is not Channel A and must not borrow Channel A's
+        # Section 4.2 target R. Its own measured R travels with it.
+        channel_a_r_override = channel_a.r_mps
+    elif which["channel_a"] == "dummy":
         channel_a = DummyVelocityEstimator(seed=1)
     else:
         ca_cfg = config.get("channel_a", {})
@@ -412,7 +533,9 @@ def build_components(config: dict) -> ComponentSet:
             delta_v_mode=ca_cfg.get("delta_v_mode", False),
         )
 
-    if which["channel_b"] == "dummy":
+    if which["channel_b"] == "none":
+        channel_b = NoVelocityEstimator()
+    elif which["channel_b"] == "dummy":
         channel_b = DummyVelocityEstimator(seed=2)
     else:
         cb_cfg = config.get("channel_b", {})
@@ -452,4 +575,5 @@ def build_components(config: dict) -> ComponentSet:
         fusion=fusion,
         map_matching=map_matching,
         road_signature_threshold=threshold,
+        channel_a_r_override=channel_a_r_override,
     )
