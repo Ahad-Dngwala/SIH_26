@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      "mx":..,"my":..,"mz":..}
  *     {"type":"gnss","t":..,"lat":..,"lon":..,"speed":..,"bearing":..,
  *      "accuracy":..,"withheld":..}
+ *     {"type":"fused","t":..,"pn":..,"pe":..}
+ *     {"type":"coast","t":..,"pn":..,"pe":..}
  *
  * `mx,my,mz` are omitted per line when no magnetometer sample is available for that
  * IMU record, matching the optional-field contract in session.py: a log without them
@@ -155,6 +157,15 @@ class SessionLogger(
      * raw imu/gnss records, so a bug here cannot flatter the reported result. */
     fun logFused(tSeconds: Double, north: Double, east: Double) {
         val line = "{\"type\":\"fused\",\"t\":${round6(tSeconds)},\"pn\":$north,\"pe\":$east}"
+        offer(line)
+    }
+
+    /** Log the app's own live coast output (no-correction inertial baseline).
+     * Recorded continuously before, during, and after blackout using the exact same
+     * local coordinate frame (pn, pe) and monotonic elapsedRealtime timebase (t)
+     * as [logFused] so the tracks can be compared directly. */
+    fun logCoast(tSeconds: Double, north: Double, east: Double) {
+        val line = "{\"type\":\"coast\",\"t\":${round6(tSeconds)},\"pn\":$north,\"pe\":$east}"
         offer(line)
     }
 

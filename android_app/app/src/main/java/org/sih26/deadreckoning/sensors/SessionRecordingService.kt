@@ -306,6 +306,7 @@ class SessionRecordingService : Service() {
             lastSnapshot = snapshot
             if (blackoutActive) finalBlackoutDriftM = snapshot.driftMeters
             logger?.logFused(snapshot.tSeconds, snapshot.fusedNorth, snapshot.fusedEast)
+            logger?.logCoast(snapshot.tSeconds, snapshot.coastNorth, snapshot.coastEast)
             publishSnapshot(snapshot)
             // Compose is a display consumer, not part of the 100 Hz hot path.
             // Publish at 5 Hz while retaining every raw/fused record in JSONL.

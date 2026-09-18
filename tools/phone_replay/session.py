@@ -66,6 +66,9 @@ separate optional stream (`{"type":"fused",...}`) used only to check
 that the Kotlin filter and the Python one agree on the same input. The
 drift measurement itself is computed offline from this file, so a bug
 in the app's display cannot flatter the result.
+Coast samples (`{"type":"coast",...}`) record the live uncorrected
+inertial baseline in the same local tangent frame for direct comparison
+with fused and GNSS ground truth before, during, and after blackout.
 """
 
 from __future__ import annotations
@@ -106,6 +109,9 @@ class PhoneSession:
 
     fused_t: np.ndarray = field(default_factory=lambda: np.empty(0))
     fused_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
+
+    coast_t: np.ndarray = field(default_factory=lambda: np.empty(0))
+    coast_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
 
     @property
     def has_magnetometer(self) -> bool:
@@ -185,6 +191,7 @@ def read_session(path: str | Path) -> PhoneSession:
     imu: list[tuple] = []
     gnss: list[tuple] = []
     fused: list[tuple] = []
+    coast: list[tuple] = []
 
     with open(path, "r", encoding="utf-8") as handle:
         for line_no, line in enumerate(handle, start=1):
@@ -235,6 +242,8 @@ def read_session(path: str | Path) -> PhoneSession:
                 )
             elif kind == "fused":
                 fused.append((record["t"], record["pn"], record["pe"]))
+            elif kind == "coast":
+                coast.append((record["t"], record["pn"], record["pe"]))
 
     if not imu:
         raise ValueError(f"{path} contains no IMU samples")
@@ -251,6 +260,7 @@ def read_session(path: str | Path) -> PhoneSession:
     gnss_arr = np.array([g[:6] for g in gnss], dtype=float)
     withheld = np.array([g[6] for g in gnss], dtype=bool)
     fused_arr = np.array(fused, dtype=float) if fused else np.empty((0, 3))
+    coast_arr = np.array(coast, dtype=float) if coast else np.empty((0, 3))
 
     t0 = float(imu_arr[0, 0])
 
@@ -269,6 +279,8 @@ def read_session(path: str | Path) -> PhoneSession:
         mag_xyz=mag_arr,
         fused_t=fused_arr[:, 0] - t0 if len(fused_arr) else np.empty(0),
         fused_pos=fused_arr[:, 1:3] if len(fused_arr) else np.empty((0, 2)),
+        coast_t=coast_arr[:, 0] - t0 if len(coast_arr) else np.empty(0),
+        coast_pos=coast_arr[:, 1:3] if len(coast_arr) else np.empty((0, 2)),
     )
 
 
@@ -315,6 +327,32 @@ def write_session(path: str | Path, session: PhoneSession) -> None:
                         "bearing": round(float(session.gnss_bearing[i]), 3),
                         "accuracy": round(float(session.gnss_accuracy[i]), 2),
                         "withheld": bool(session.gnss_withheld[i]),
+                    }
+                )
+                + "\n"
+            )
+
+        for i in range(len(session.fused_t)):
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "fused",
+                        "t": round(float(session.fused_t[i]), 6),
+                        "pn": float(session.fused_pos[i, 0]),
+                        "pe": float(session.fused_pos[i, 1]),
+                    }
+                )
+                + "\n"
+            )
+
+        for i in range(len(session.coast_t)):
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "coast",
+                        "t": round(float(session.coast_t[i]), 6),
+                        "pn": float(session.coast_pos[i, 0]),
+                        "pe": float(session.coast_pos[i, 1]),
                     }
                 )
                 + "\n"

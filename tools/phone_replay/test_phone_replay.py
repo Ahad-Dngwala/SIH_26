@@ -167,3 +167,25 @@ def test_latlon_projection_round_trips():
     assert ne[1, 0] == pytest.approx(111.0, abs=1.0)
     # Longitude is foreshortened by cos(lat).
     assert ne[1, 1] == pytest.approx(111.0 * np.cos(np.radians(lat0)), abs=1.0)
+
+
+def test_fused_and_coast_streams_round_trip(tmp_path, session):
+    """Fused and coast trajectory streams are optional in the log format,
+    but when present they must load correctly into PhoneSession."""
+    path = tmp_path / "with_fused_and_coast.jsonl"
+    write_session(path, session)
+
+    # Append fused and coast sample records in the format SessionLogger writes
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"type":"fused","t":10.000000,"pn":12.345678,"pe":98.765432}\n')
+        handle.write('{"type":"coast","t":10.000000,"pn":12.345678,"pe":98.765432}\n')
+        handle.write('{"type":"fused","t":10.010000,"pn":12.500000,"pe":98.900000}\n')
+        handle.write('{"type":"coast","t":10.010000,"pn":12.480000,"pe":98.880000}\n')
+
+    reloaded = read_session(path)
+    assert len(reloaded.fused_t) == 2
+    assert len(reloaded.coast_t) == 2
+    assert reloaded.fused_pos.shape == (2, 2)
+    assert reloaded.coast_pos.shape == (2, 2)
+    np.testing.assert_allclose(reloaded.fused_pos[0], [12.345678, 98.765432])
+    np.testing.assert_allclose(reloaded.coast_pos[1], [12.480000, 98.880000])
