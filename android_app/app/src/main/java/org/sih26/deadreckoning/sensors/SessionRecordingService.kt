@@ -110,7 +110,12 @@ class SessionRecordingService : Service() {
         val gnssFixes: Long,
         val gnssSpeedMps: Double?,
         val gnssAccuracyM: Double?,
-        val snapshot: FusionSnapshot?
+        val snapshot: FusionSnapshot?,
+        /** Samples the logger's bounded queue had to drop because the writer
+         * thread fell behind. Non-zero means the raw log has a real gap in `t`
+         * somewhere - worth knowing about during the drive, not just after
+         * replaying the log, since it is otherwise silent. */
+        val droppedSamples: Long
     )
 
     private lateinit var sensorManager: SensorManager
@@ -385,6 +390,7 @@ class SessionRecordingService : Service() {
     private fun stopRecording() {
         sensorManager.unregisterListener(sensorListener)
         locationManager.removeUpdates(locationListener)
+        val droppedSamples = logger?.droppedSampleCount ?: 0
         logger?.close()
         val now = android.os.SystemClock.elapsedRealtimeNanos()
         if (blackoutActive) {
@@ -398,7 +404,8 @@ class SessionRecordingService : Service() {
                 durationS = (now - sessionStartElapsedNs) / 1_000_000_000.0,
                 imuSamples = pipeline?.imuSamples ?: 0, gnssFixes = gnssFixes,
                 distanceM = distanceM, blackoutDurationS = blackoutDurationS,
-                finalDriftM = finalBlackoutDriftM, rawFile = rawFile
+                finalDriftM = finalBlackoutDriftM, rawFile = rawFile,
+                droppedSamples = droppedSamples
             ))
         }
         logger = null
@@ -445,7 +452,8 @@ class SessionRecordingService : Service() {
             elapsedS = if (pipeline == null) 0.0 else (now - sessionStartElapsedNs) / 1_000_000_000.0,
             distanceM = distanceM, imuSamples = pipeline?.imuSamples ?: 0,
             gnssFixes = gnssFixes, gnssSpeedMps = lastGnssSpeedMps,
-            gnssAccuracyM = lastGnssAccuracyM, snapshot = lastSnapshot
+            gnssAccuracyM = lastGnssAccuracyM, snapshot = lastSnapshot,
+            droppedSamples = logger?.droppedSampleCount ?: 0
         )
         Handler(Looper.getMainLooper()).post { telemetryListener?.invoke(telemetry) }
     }

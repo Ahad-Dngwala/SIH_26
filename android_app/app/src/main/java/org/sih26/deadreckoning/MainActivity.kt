@@ -187,6 +187,12 @@ private fun LiveScreen(
                 t?.snapshot?.let { snap ->
                     MetricRow("Heading", "${fmt(snap.headingDeg)} deg", "Drift", if (t.blackout) "${fmt(snap.driftMeters)} m (${fmt(snap.driftPercent)}%)" else "n/a - GNSS live")
                 }
+                if ((t?.droppedSamples ?: 0) > 0) {
+                    Text(
+                        "WARNING: ${t?.droppedSamples} samples dropped - the writer is falling behind, the raw log has a gap in t.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         }
 
@@ -244,6 +250,12 @@ private fun SessionCard(r: SessionRecord, export: (File) -> Unit, delete: (Sessi
                 Text("Final blackout drift: ${r.finalDriftM?.let { "${fmt(it)} m" } ?: "not measured (no blackout this session)"}")
                 Text("Raw file: ${r.rawFile.name}", style = MaterialTheme.typography.bodySmall)
                 Text("File on disk: ${r.rawFile.length() / 1024} KB", style = MaterialTheme.typography.bodySmall)
+                if (r.droppedSamples > 0) {
+                    Text(
+                        "${r.droppedSamples} samples dropped during recording - log has a gap in t.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button({ export(r.rawFile) }) { Text("Export JSONL") }
                     OutlinedButton({ confirmingDelete = true }) { Text("Delete") }
@@ -277,6 +289,7 @@ private fun DiagnosticsScreen(t: SessionRecordingService.RecordingTelemetry?, fr
                 DiagRow("Pipeline phase", t?.phase?.name ?: "n/a")
                 DiagRow("Waiting for moving fix", if (t?.waitingForMovement == true) "yes" else "no")
                 DiagRow("Software blackout", if (t?.blackout == true) "ACTIVE" else "off")
+                DiagRow("Dropped samples (writer behind)", "${t?.droppedSamples ?: 0}")
                 t?.snapshot?.let { snap ->
                     DiagRow("IMU sample rate", "${fmt(snap.imuRateHz)} Hz")
                     DiagRow("Filter step latency", "${fmt(snap.stepLatencyMs)} ms")

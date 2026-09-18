@@ -20,9 +20,16 @@ A Gradle project now exists: `settings.gradle.kts`, root `build.gradle.kts`,
    `tools/parity/README.md`.
 5. Blackout toggle with live drift readout - `MainActivity.kt`'s Compose UI plus
    `SessionRecordingService.ACTION_SET_BLACKOUT`.
-6. Minimal UI - present, deliberately plain per the handoff (mode, speed, heading,
-   blackout elapsed/distance/drift, IMU rate, step latency).
-7. **Not yet driven.** No real recording exists; physical-device logging is the
+6. Three-tab field-test UI - `Live` (status, trajectory canvas, blackout toggle),
+   `Sessions` (history with per-session detail, export, delete, and automatic
+   recovery of any recording whose sidecar never got written), `Diagnostics` (raw
+   front-end status string, IMU rate, filter latency, ZUPT state, Channel P speed,
+   and all three track positions unrounded). Diagnostics is deliberately off the
+   main screen; see `Master_Implementation_Plan.md`'s "Field-test UI increment".
+7. A partial wake lock is held for the duration of a recording
+   (`SessionRecordingService`) so screen-off Doze throttling cannot silently reduce
+   the sampling rate below what was measured against.
+8. **Not yet driven.** No real recording exists; physical-device logging is the
    next acceptance gate.
 
 The Kotlin 2.0 build applies `org.jetbrains.kotlin.plugin.compose`, rather than the

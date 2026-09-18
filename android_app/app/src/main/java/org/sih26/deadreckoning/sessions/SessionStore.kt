@@ -17,7 +17,12 @@ data class SessionRecord(
     val distanceM: Double,
     val blackoutDurationS: Double,
     val finalDriftM: Double?,
-    val rawFile: File
+    val rawFile: File,
+    /** Samples [SessionLogger]'s bounded queue dropped because the writer thread
+     * fell behind. Defaults to 0 so sidecars written before this field existed,
+     * and orphan-recovered sessions (which cannot know this after the fact), keep
+     * loading rather than failing to parse. */
+    val droppedSamples: Long = 0
 )
 
 class SessionStore(private val root: File) {
@@ -38,6 +43,7 @@ class SessionStore(private val root: File) {
             .put("blackout_duration_s", record.blackoutDurationS)
             .put("final_drift_m", record.finalDriftM)
             .put("raw_file", record.rawFile.name)
+            .put("dropped_samples", record.droppedSamples)
         File(root, "session_${record.id}.meta.json").writeText(json.toString())
     }
 
@@ -137,7 +143,8 @@ class SessionStore(private val root: File) {
                     distanceM = json.getDouble("distance_m"),
                     blackoutDurationS = json.getDouble("blackout_duration_s"),
                     finalDriftM = if (json.isNull("final_drift_m")) null else json.getDouble("final_drift_m"),
-                    rawFile = raw
+                    rawFile = raw,
+                    droppedSamples = json.optLong("dropped_samples", 0)
                 )
             }.getOrNull()
         }?.sortedByDescending { it.startedUtc } ?: emptyList()

@@ -90,6 +90,27 @@ Implemented against the milestone above:
   time the Sessions tab is opened, rather than data silently sitting on disk that
   the app claims does not exist. A currently-recording session is excluded via a
   file-freshness check so this cannot race the active recording.
+- Added dropped-sample visibility end to end: `SessionLogger.droppedSampleCount` was
+  tracked but never read anywhere. It now flows into `RecordingTelemetry`, is
+  written into the session sidecar (`dropped_samples`, backward-compatible via
+  `optLong` for old sidecars and orphan-recovered ones), and surfaces as a warning
+  on the Live tab, a Diagnostics row, and a Sessions detail line - a dropped-sample
+  gap in `t` is exactly the kind of thing that should not require replaying the
+  log offline to discover.
+- Investigated `map_matching/` and `tools/map_matching/` concretely rather than
+  deferring on assumption. Both implementations (`map_matching/hmm/viterbi_matcher.py`'s
+  sliding-window Viterbi decoder and `tools/map_matching/matcher.py`'s simpler
+  greedy nearest-segment-with-heading matcher) depend on a `RoadNetwork` built by
+  `tools/map_matching/map_provider.py` via `networkx`/`osmnx`/`scipy`, which
+  downloads or loads a cached OSM `.graphml` extract for the corridor at
+  construction time. None of that - the graph structure, the road-segment asset,
+  or a spatial-index equivalent - exists in a form Android can load offline today.
+  Porting even the simpler greedy matcher would mean building a corridor-asset
+  export pipeline, an on-device graph/spatial-index representation, and the
+  drift-neutrality test the milestone requires, none of which is the highest-value
+  use of the remaining time versus the recording/session/diagnostics gaps this
+  pass closed. Confirmed deferred; the trajectory canvas's `TrackKind` enum is
+  where a fourth matched-position source would plug in when that asset exists.
 - Deferred, deliberately: MapLibre/offline vector tiles, ONNX model inference,
   Room, and live HMM/Viterbi map matching remain out of scope per the "Current
   implementation direction" note above. A future increment can layer a matched
