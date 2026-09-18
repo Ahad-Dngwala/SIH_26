@@ -68,3 +68,11 @@ cache/
 # Model Weights
 models/**/weights/*.pth
 models/**/*.pth
+!models/stage12/checkpoints/best_motionspeednet.pth
+!models/stage12/config/norm_stats.json
+
+# Scratch and test run outputs
+scratch/
+test_runs/
+visualization/
+

@@ -1,0 +1,27 @@
+{
+  "Must_Have": {
+    "Drift_pct": 0.484,
+    "Endpoint_Error_m": 1.8,
+    "Trajectory_RMSE_m": 50.747,
+    "Distance_Error_pct": 4.73,
+    "Speed_MAE_mps": 1.352,
+    "Speed_Bias_mps": -0.27,
+    "Final_Heading_Error_deg": 0.54,
+    "Along_Track_RMSE_m": 50.67,
+    "Cross_Track_RMSE_m": 2.796
+  },
+  "Generalization": {
+    "Mean_Drift_pct": 2.026,
+    "Median_Drift_pct": 2.257,
+    "Worst_Case_Drift_pct": 2.922,
+    "Pct_Under_10_Drift": 100.0,
+    "Pct_Under_5_Drift": 100.0,
+    "Total_Evaluation_Windows": 10
+  },
+  "Deployment": {
+    "Model_Parameters": 57603,
+    "Inference_Latency_ms": 3.82,
+    "Latency_P95_ms": 5.69,
+    "Memory_Footprint_KB": 225.0
+  }
+}
