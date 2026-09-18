@@ -51,6 +51,7 @@ android_app/**/local.properties
 android_app/**/*.iml
 android_app/**/.cxx/
 .idea/
+android_app/test_runs
 
 # ---- Map data extracts (large, regenerated at build time - see map_matching/osm_extraction/README.md) ----
 map_matching/osm_extraction/*.osm.pbf
