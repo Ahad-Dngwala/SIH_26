@@ -41,6 +41,14 @@ class SessionStore(private val root: File) {
         File(root, "session_${record.id}.meta.json").writeText(json.toString())
     }
 
+    /** Removes a session's sidecar metadata and its raw JSONL artifact. Nothing else
+     * on disk references either file, so deleting both is enough to make the
+     * session disappear from [recent] and free the space it used. */
+    fun delete(record: SessionRecord) {
+        File(root, "session_${record.id}.meta.json").delete()
+        record.rawFile.delete()
+    }
+
     fun recent(): List<SessionRecord> = root.listFiles { file ->
         file.name.endsWith(".meta.json")
     }?.mapNotNull { file ->

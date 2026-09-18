@@ -52,6 +52,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    // Bottom-nav icons (Navigation, List, Info) live outside the core icon set.
+    implementation("androidx.compose.material:material-icons-extended")
 
     // EJML was considered and deliberately not used - see the module doc at the top
     // of fusion/LinAlg.kt for the reasoning and the parity fixture that stands in

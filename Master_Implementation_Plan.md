@@ -54,6 +54,37 @@ into a shipped offline asset and a test proves that it cannot alter raw UKF drif
 measurement. It must not be used as a UKF correction or require network access in
 the field-test build.
 
+### Field-test UI increment (2026-09-18, ownership pass)
+
+Implemented against the milestone above:
+
+- Replaced the single-screen dashboard with a three-destination app (`Live`,
+  `Sessions`, `Diagnostics`) behind a bottom `NavigationBar`, so the person driving
+  sees only the handful of numbers that matter and diagnostics never crowd the main
+  screen during a demo.
+- Added `ui/TrajectoryCanvas.kt`: a dependency-free Compose `Canvas` (no map tiles,
+  no network) that plots GNSS truth, the fused UKF track, and the no-correction
+  coast baseline as three visually distinct tracks, fed directly from
+  `FusionSnapshot`'s existing `fusedNorth/East`, `coastNorth/East`, and
+  `lastTruthNorth/East` fields. This satisfies this section's "retain GNSS truth,
+  raw fused positions, and any future map-matched positions separately" requirement
+  without taking on MapLibre or an OSM asset pipeline this close to the deadline.
+  Live UI state (the trail) is kept in Compose state, not persisted; the JSONL log
+  remains the source of truth for offline analysis.
+- `SessionStore.delete()` added; the Sessions tab now supports expand-to-detail
+  (metadata + on-disk file size), export, and delete with a confirmation dialog,
+  closing the "delete sessions" gap in Section 3's priorities.
+- Diagnostics tab surfaces the raw front-end status string
+  (`FusionPipeline.describeFrontEnd()`, previously wired to a listener nothing
+  read) plus per-cycle IMU rate, filter step latency, ZUPT state, Channel P speed,
+  and all three track positions, unrounded.
+- Deferred, deliberately: MapLibre/offline vector tiles, ONNX model inference,
+  Room, and live HMM/Viterbi map matching remain out of scope per the "Current
+  implementation direction" note above. A future increment can layer a matched
+  track onto the same canvas as a fourth `TrackKind` once a corridor asset and a
+  drift-neutrality test exist; the canvas's per-source separation was built with
+  that extension in mind.
+
 ---
 
 ## 0. System Summary (read this first)
