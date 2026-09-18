@@ -172,10 +172,21 @@ private fun LiveScreen(
 
         val phase = when {
             t?.blackout == true -> "GNSS BLACKOUT"
+            t?.gpsProviderEnabled == false -> "GPS IS OFF"
             t?.waitingForMovement == true -> "WAITING FOR MOVEMENT"
             else -> t?.phase?.name?.replace('_', ' ') ?: "STARTING"
         }
-        PhaseCard(phase = phase, blackout = t?.blackout == true)
+        PhaseCard(phase = phase, blackout = t?.blackout == true || t?.gpsProviderEnabled == false)
+
+        if (t?.gpsProviderEnabled == false) {
+            ErrorBanner("GPS is turned off in system settings. Enable location services - this looks identical to \"waiting for a fix\" otherwise.")
+        }
+        if (t?.loggerFailed == true) {
+            ErrorBanner("Recording is NOT being saved: the storage write failed (disk full or unmounted). Stop and check free space.")
+        }
+        if (t?.fusionFailed == true) {
+            ErrorBanner("The on-device fused track has stopped updating after an internal error. Raw sensor/GNSS logging is unaffected and this drive is still worth keeping.")
+        }
 
         TrajectoryCanvas(trail, Modifier.fillMaxWidth())
 
@@ -203,6 +214,13 @@ private fun LiveScreen(
             }
             Switch(checked = t?.blackout == true, onCheckedChange = blackout)
         }
+    }
+}
+
+@Composable
+private fun ErrorBanner(text: String) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Text(text, Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
     }
 }
 
@@ -256,6 +274,18 @@ private fun SessionCard(r: SessionRecord, export: (File) -> Unit, delete: (Sessi
                         color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall
                     )
                 }
+                if (r.loggerFailed) {
+                    Text(
+                        "Storage write failed partway through - this recording is truncated.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                if (r.fusionFailed) {
+                    Text(
+                        "Fusion pipeline failed partway through - raw sensor/GNSS data is intact, fused track is not.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button({ export(r.rawFile) }) { Text("Export JSONL") }
                     OutlinedButton({ confirmingDelete = true }) { Text("Delete") }
@@ -289,7 +319,10 @@ private fun DiagnosticsScreen(t: SessionRecordingService.RecordingTelemetry?, fr
                 DiagRow("Pipeline phase", t?.phase?.name ?: "n/a")
                 DiagRow("Waiting for moving fix", if (t?.waitingForMovement == true) "yes" else "no")
                 DiagRow("Software blackout", if (t?.blackout == true) "ACTIVE" else "off")
+                DiagRow("GPS provider (system setting)", if (t?.gpsProviderEnabled == false) "DISABLED" else "enabled")
                 DiagRow("Dropped samples (writer behind)", "${t?.droppedSamples ?: 0}")
+                DiagRow("Storage write failed", if (t?.loggerFailed == true) "YES - not saving" else "no")
+                DiagRow("Fusion pipeline failed", if (t?.fusionFailed == true) "YES - raw-only" else "no")
                 t?.snapshot?.let { snap ->
                     DiagRow("IMU sample rate", "${fmt(snap.imuRateHz)} Hz")
                     DiagRow("Filter step latency", "${fmt(snap.stepLatencyMs)} ms")

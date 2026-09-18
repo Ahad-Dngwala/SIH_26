@@ -22,7 +22,16 @@ data class SessionRecord(
      * fell behind. Defaults to 0 so sidecars written before this field existed,
      * and orphan-recovered sessions (which cannot know this after the fact), keep
      * loading rather than failing to parse. */
-    val droppedSamples: Long = 0
+    val droppedSamples: Long = 0,
+    /** Whether the storage write failed at some point during this session (disk
+     * full, storage unmounted) - if true, the raw file is a truncated recording,
+     * not a complete one. Defaults to false for the same backward-compatibility
+     * reason as [droppedSamples]. */
+    val loggerFailed: Boolean = false,
+    /** Whether the fusion pipeline threw and was disabled for part of this
+     * session - if true, the fused/coast tracks in the raw file stop partway
+     * through, but raw IMU/GNSS logging is unaffected. */
+    val fusionFailed: Boolean = false
 )
 
 class SessionStore(private val root: File) {
@@ -44,6 +53,8 @@ class SessionStore(private val root: File) {
             .put("final_drift_m", record.finalDriftM)
             .put("raw_file", record.rawFile.name)
             .put("dropped_samples", record.droppedSamples)
+            .put("logger_failed", record.loggerFailed)
+            .put("fusion_failed", record.fusionFailed)
         File(root, "session_${record.id}.meta.json").writeText(json.toString())
     }
 
@@ -144,7 +155,9 @@ class SessionStore(private val root: File) {
                     blackoutDurationS = json.getDouble("blackout_duration_s"),
                     finalDriftM = if (json.isNull("final_drift_m")) null else json.getDouble("final_drift_m"),
                     rawFile = raw,
-                    droppedSamples = json.optLong("dropped_samples", 0)
+                    droppedSamples = json.optLong("dropped_samples", 0),
+                    loggerFailed = json.optBoolean("logger_failed", false),
+                    fusionFailed = json.optBoolean("fusion_failed", false)
                 )
             }.getOrNull()
         }?.sortedByDescending { it.startedUtc } ?: emptyList()

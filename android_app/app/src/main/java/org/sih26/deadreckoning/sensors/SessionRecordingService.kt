@@ -63,6 +63,15 @@ import java.io.File
  *    is held for the duration of the recording (see [wakeLock]) so a real unattended
  *    drive with the screen off is not silently sampled at a lower rate than the one
  *    this project's numbers were measured against.
+ * 8. Two failure modes must not be allowed to silently end a recording:
+ *    [SessionLogger] hitting an unrecoverable disk-write error, and
+ *    [FusionPipeline.onImu] throwing on a numerical edge case. Both are caught at
+ *    their call site, surfaced to the UI ([RecordingTelemetry.loggerFailed] /
+ *    [RecordingTelemetry.fusionFailed]), and degrade rather than crash: a logger
+ *    failure stops further writes but the app keeps running so the driver notices,
+ *    and a fusion failure disables the fused track for the rest of the session
+ *    while raw sensor/GNSS logging - the one asset a field test cannot repeat -
+ *    continues uncorrected.
  */
 class SessionRecordingService : Service() {
 
@@ -115,7 +124,25 @@ class SessionRecordingService : Service() {
          * thread fell behind. Non-zero means the raw log has a real gap in `t`
          * somewhere - worth knowing about during the drive, not just after
          * replaying the log, since it is otherwise silent. */
-        val droppedSamples: Long
+        val droppedSamples: Long,
+        /** True once [SessionLogger] has hit an unrecoverable write error (disk
+         * full, storage unmounted). Distinct from [droppedSamples]: this means
+         * nothing further is being saved at all, not just that the writer fell
+         * behind - a driver needs to know this immediately, not after the drive. */
+        val loggerFailed: Boolean,
+        /** True once the fusion pipeline has thrown on a numerical edge case
+         * (see [maybeEmitImuSample]) and been disabled for the rest of the
+         * session. Raw accelerometer/gyroscope/GNSS logging is unaffected - only
+         * the on-device fused track and live drift readout stop updating. */
+        val fusionFailed: Boolean,
+        /** [LocationManager.GPS_PROVIDER]'s enabled/disabled toggle in system
+         * settings, checked fresh on every publish. Permission being granted does
+         * not mean GPS is actually on - a phone with the setting off looks
+         * identical to a phone still waiting for its first fix (both sit at
+         * WAITING_FOR_GNSS with zero GNSS fixes), which is a real field-test trap:
+         * without this, the only way to tell them apart is to notice fixes never
+         * arrive at all. */
+        val gpsProviderEnabled: Boolean
     )
 
     private lateinit var sensorManager: SensorManager
@@ -149,6 +176,11 @@ class SessionRecordingService : Service() {
 
     private var sessionStartElapsedNs: Long = 0L
     private var latestMagnetometer: FloatArray? = null
+
+    /** Set once [FusionPipeline.onImu] throws. Raw sensor logging is on the
+     * critical path and must survive a bug in the newer, less-battle-tested
+     * fusion math; see [maybeEmitImuSample]. */
+    private var fusionFailed = false
 
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
@@ -201,11 +233,30 @@ class SessionRecordingService : Service() {
             mag?.get(0)?.toDouble(), mag?.get(1)?.toDouble(), mag?.get(2)?.toDouble()
         )
 
-        val snapshot = pipeline?.onImu(
-            timestampNs,
-            doubleArrayOf(accel[0].toDouble(), accel[1].toDouble(), accel[2].toDouble()),
-            doubleArrayOf(gyro[0].toDouble(), gyro[1].toDouble(), gyro[2].toDouble())
-        )
+        // The raw imu/gnss records above are already queued for the writer by this
+        // point regardless of what happens next - that is the one asset a field
+        // test cannot afford to lose. The fusion step is comparatively young code
+        // (a fresh Kotlin port, exercised by the parity/front-end gates but not
+        // yet a real drive) and can throw on a genuine numerical edge case (an
+        // ill-conditioned covariance, a singular matrix - see LinAlg.kt). One bad
+        // cycle must not take the whole recording down with it: catch, disable
+        // fusion for the remainder of this session so it does not throw again
+        // every cycle at 100 Hz, and keep the raw log running uncorrected.
+        val snapshot = if (fusionFailed) null else try {
+            pipeline?.onImu(
+                timestampNs,
+                doubleArrayOf(accel[0].toDouble(), accel[1].toDouble(), accel[2].toDouble()),
+                doubleArrayOf(gyro[0].toDouble(), gyro[1].toDouble(), gyro[2].toDouble())
+            )
+        } catch (t: Throwable) {
+            fusionFailed = true
+            publishStatus(
+                "ERROR: fusion pipeline failed (${t.javaClass.simpleName}: ${t.message}); " +
+                    "raw IMU/GNSS logging continues uncorrected for the rest of this session."
+            )
+            publishTelemetry()
+            null
+        }
         if (snapshot != null) {
             lastSnapshot = snapshot
             if (blackoutActive) finalBlackoutDriftM = snapshot.driftMeters
@@ -328,10 +379,24 @@ class SessionRecordingService : Service() {
         // to duplicate intents after process recreation.
         if (pipeline != null) return
 
+        // startForeground() must be called promptly whenever the service was
+        // reached via startForegroundService() (MainActivity always uses that),
+        // regardless of what the validation below finds - the system enforces
+        // this with a hard crash (ForegroundServiceDidNotStartInTimeException) if
+        // it is skipped. The two validation failure branches below used to call
+        // stopSelf() before ever reaching the startForeground() call further down
+        // this function, which is exactly the sequence that crash requires: deny
+        // the location permission (or start with GPS/sensors unavailable) and the
+        // whole app would go down instead of showing the intended error message.
+        // Calling it first with a "starting" notification, then tearing it down
+        // cleanly on failure, satisfies the contract unconditionally.
+        startForeground(NOTIFICATION_ID, buildNotification())
+
         if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
         ) {
             publishStatus("ERROR: location permission not granted")
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
@@ -341,11 +406,10 @@ class SessionRecordingService : Service() {
         val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         if (accelerometer == null || gyroscope == null) {
             publishStatus("ERROR: device is missing accelerometer or gyroscope")
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
-
-        startForeground(NOTIFICATION_ID, buildNotification())
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sih26:recording").apply {
@@ -370,6 +434,7 @@ class SessionRecordingService : Service() {
         lastGnssAccuracyM = null
         lastSnapshot = null
         lastTelemetryPublishNs = 0L
+        fusionFailed = false
         pipeline = FusionPipeline()
 
         val (newSessionId, outFile) = sessionStore.newSessionFile()
@@ -403,6 +468,7 @@ class SessionRecordingService : Service() {
         sensorManager.unregisterListener(sensorListener)
         locationManager.removeUpdates(locationListener)
         val droppedSamples = logger?.droppedSampleCount ?: 0
+        val loggerFailed = logger?.failed ?: false
         logger?.close()
         val now = android.os.SystemClock.elapsedRealtimeNanos()
         if (blackoutActive) {
@@ -417,7 +483,9 @@ class SessionRecordingService : Service() {
                 imuSamples = pipeline?.imuSamples ?: 0, gnssFixes = gnssFixes,
                 distanceM = distanceM, blackoutDurationS = blackoutDurationS,
                 finalDriftM = finalBlackoutDriftM, rawFile = rawFile,
-                droppedSamples = droppedSamples
+                droppedSamples = droppedSamples,
+                loggerFailed = loggerFailed,
+                fusionFailed = fusionFailed
             ))
         }
         logger = null
@@ -465,7 +533,12 @@ class SessionRecordingService : Service() {
             distanceM = distanceM, imuSamples = pipeline?.imuSamples ?: 0,
             gnssFixes = gnssFixes, gnssSpeedMps = lastGnssSpeedMps,
             gnssAccuracyM = lastGnssAccuracyM, snapshot = lastSnapshot,
-            droppedSamples = logger?.droppedSampleCount ?: 0
+            droppedSamples = logger?.droppedSampleCount ?: 0,
+            loggerFailed = logger?.failed ?: false,
+            fusionFailed = fusionFailed,
+            gpsProviderEnabled = runCatching {
+                locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+            }.getOrDefault(true)
         )
         Handler(Looper.getMainLooper()).post { telemetryListener?.invoke(telemetry) }
     }

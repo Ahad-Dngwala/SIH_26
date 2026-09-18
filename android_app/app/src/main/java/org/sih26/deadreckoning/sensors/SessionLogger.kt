@@ -3,6 +3,7 @@ package org.sih26.deadreckoning.sensors
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
+import java.io.IOException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,14 +50,34 @@ class SessionLogger(
     private val running = AtomicBoolean(true)
     private var droppedSamples = 0L
 
+    /** Set once a write to [outputFile] throws (disk full, storage unmounted, an SD
+     * card pulled mid-drive). An uncaught [IOException] here would previously kill
+     * this daemon thread silently: nothing would drain the queue afterwards, so
+     * every subsequent sample would eventually overflow it and count as an
+     * ordinary "dropped" sample via [offer] - indistinguishable in the UI from the
+     * writer merely falling behind, when the real story is that nothing has been
+     * saved at all since the failure. Once set, the loop keeps polling and
+     * draining the queue (so [close] still joins cleanly and producers never
+     * block) but stops attempting further writes, since a failed volume rarely
+     * recovers mid-write. [failed] is the signal callers should surface, not the
+     * drop counter. */
+    @Volatile
+    var failed: Boolean = false
+        private set
+
     private val writerThread = Thread({
         while (running.get() || queue.isNotEmpty()) {
             val line = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
-            writer.write(line)
-            writer.newLine()
+            if (failed) continue
+            try {
+                writer.write(line)
+                writer.newLine()
+            } catch (e: IOException) {
+                failed = true
+            }
         }
-        writer.flush()
-        writer.close()
+        runCatching { writer.flush() }
+        runCatching { writer.close() }
     }, "session-logger-writer").apply {
         isDaemon = true
     }
