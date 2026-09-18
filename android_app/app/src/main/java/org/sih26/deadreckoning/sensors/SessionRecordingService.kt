@@ -319,6 +319,33 @@ class SessionRecordingService : Service() {
         override fun onProviderDisabled(provider: String) = Unit
     }
 
+    /**
+     * Keeps [RecordingTelemetry] ticking at roughly 1 Hz for the whole session,
+     * independent of what else is happening.
+     *
+     * Before this, a telemetry publish only happened as a side effect of a GNSS
+     * fix arriving or a fused IMU cycle completing (`RUNNING` phase only - see
+     * [maybeEmitImuSample]). That is fine once the pipeline is running, but it
+     * means the Live screen goes completely silent - no elapsed time, no phase
+     * change, nothing - for however long `LEVELING`/`WAITING_FOR_GNSS` takes
+     * without a GNSS fix to drive an update. With GPS disabled at system level
+     * (the exact case [RecordingTelemetry.gpsProviderEnabled] exists to catch)
+     * that silence is permanent: no fix ever arrives, so nothing after the very
+     * first publish at [startRecording] would ever have refreshed it. A driver
+     * watching a frozen screen for the first 30+ seconds of a cold GNSS fix
+     * cannot tell "working normally" from "stuck"; this heartbeat removes that
+     * ambiguity by guaranteeing a fresh publish every second for as long as
+     * [pipeline] is non-null, cheap since [publishTelemetry] is already cheap
+     * (no sensor I/O, just a data class copy and a main-thread post).
+     */
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            if (pipeline == null) return
+            publishTelemetry()
+            handler.postDelayed(this, 1000L)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -462,9 +489,12 @@ class SessionRecordingService : Service() {
             thread.looper
         )
         publishTelemetry()
+        handler.removeCallbacks(heartbeat)
+        handler.postDelayed(heartbeat, 1000L)
     }
 
     private fun stopRecording() {
+        handler.removeCallbacks(heartbeat)
         sensorManager.unregisterListener(sensorListener)
         locationManager.removeUpdates(locationListener)
         val droppedSamples = logger?.droppedSampleCount ?: 0

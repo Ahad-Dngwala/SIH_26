@@ -1,11 +1,13 @@
 package org.sih26.deadreckoning
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -50,6 +52,12 @@ class MainActivity : ComponentActivity() {
     // catches that second path - see hasLocationPermission()).
     private var hasLocationPermission by mutableStateOf(false)
 
+    // Advisory, not gating (see the manifest comment on the permission this backs)
+    // - a session records fine without it on stock Android. Also re-checked in
+    // onResume, since the exemption is granted from a system settings screen this
+    // activity does not get a direct callback from.
+    private var ignoringBatteryOptimizations by mutableStateOf(false)
+
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         hasLocationPermission = hasLocationPermission()
     }
@@ -57,6 +65,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hasLocationPermission = hasLocationPermission()
+        ignoringBatteryOptimizations = isIgnoringBatteryOptimizations()
         val required = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
@@ -72,6 +81,8 @@ class MainActivity : ComponentActivity() {
                         requestPermission = { permissions.launch(required) },
                         openAppSettings = ::openAppSettings,
                         freeStorageBytes = { getExternalFilesDir(null)?.freeSpace ?: Long.MAX_VALUE },
+                        ignoringBatteryOptimizations = ignoringBatteryOptimizations,
+                        requestIgnoreBatteryOptimizations = ::requestIgnoreBatteryOptimizations,
                         start = { ContextCompat.startForegroundService(this, intent(SessionRecordingService.ACTION_START)) },
                         stop = { startService(intent(SessionRecordingService.ACTION_STOP)) },
                         blackout = { active -> startService(intent(SessionRecordingService.ACTION_SET_BLACKOUT).putExtra(SessionRecordingService.EXTRA_BLACKOUT_ACTIVE, active)) },
@@ -90,10 +101,26 @@ class MainActivity : ComponentActivity() {
         // resumes this activity without going through the permissions launcher's
         // own callback above.
         hasLocationPermission = hasLocationPermission()
+        ignoringBatteryOptimizations = isIgnoringBatteryOptimizations()
     }
 
     private fun hasLocationPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestIgnoreBatteryOptimizations() {
+        // No ACTION_APPLICATION_DETAILS_SETTINGS fallback needed here the way
+        // openAppSettings has one for location: unlike a runtime permission,
+        // this request intent does not silently stop presenting itself after a
+        // prior denial, so re-showing it is always the right action.
+        startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        )
+    }
 
     private fun openAppSettings() {
         startActivity(
@@ -124,6 +151,8 @@ private fun App(
     requestPermission: () -> Unit,
     openAppSettings: () -> Unit,
     freeStorageBytes: () -> Long,
+    ignoringBatteryOptimizations: Boolean,
+    requestIgnoreBatteryOptimizations: () -> Unit,
     start: () -> Unit,
     stop: () -> Unit,
     blackout: (Boolean) -> Unit,
@@ -173,6 +202,8 @@ private fun App(
                     requestPermission = requestPermission,
                     openAppSettings = openAppSettings,
                     freeStorageBytes = freeStorageBytes,
+                    ignoringBatteryOptimizations = ignoringBatteryOptimizations,
+                    requestIgnoreBatteryOptimizations = requestIgnoreBatteryOptimizations,
                     start = { trail.clear(); start() }, stop = stop, blackout = blackout
                 )
                 Tab.SESSIONS -> SessionsScreen(records, export) { record ->
@@ -201,6 +232,8 @@ private fun LiveScreen(
     requestPermission: () -> Unit,
     openAppSettings: () -> Unit,
     freeStorageBytes: () -> Long,
+    ignoringBatteryOptimizations: Boolean,
+    requestIgnoreBatteryOptimizations: () -> Unit,
     start: () -> Unit,
     stop: () -> Unit,
     blackout: (Boolean) -> Unit
@@ -245,6 +278,9 @@ private fun LiveScreen(
                     "GNSS heading initialises the filter.",
                 style = MaterialTheme.typography.bodyMedium
             )
+            if (!ignoringBatteryOptimizations) {
+                BatteryOptimizationBanner(requestIgnoreBatteryOptimizations)
+            }
             return@Column
         }
 
@@ -308,6 +344,35 @@ private fun LiveScreen(
  * denial; once the OS considers it permanently denied, that dialog silently
  * no-ops instead of reappearing, which is what [openAppSettings] is for.
  */
+/**
+ * Advisory-only, shown before a recording starts. The foreground service plus
+ * its partial wake lock already keep stock Android from throttling sensor
+ * delivery with the screen off (see `SessionRecordingService`'s class docs,
+ * point 7) - this is for the layer several OEM skins (MIUI, ColorOS, and
+ * similar heavier customizations) add on top of stock Doze, which the wake lock
+ * alone does not reliably survive on those. Exempting the app from battery
+ * optimization is the one piece of that OEM-specific gap that is fixable from
+ * inside the app via a documented API, rather than a "clear the app from
+ * recents and disable autostart controls" set of vendor-specific settings
+ * screens with no common Android API - flagged as the known remaining gap in
+ * Master_Implementation_Plan.md rather than silently left unfixed.
+ */
+@Composable
+private fun BatteryOptimizationBanner(request: () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                "For a long unattended drive, exempt this app from battery optimization - " +
+                    "some phones throttle sensors in the background even with a recording " +
+                    "notification showing.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            OutlinedButton(onClick = request) { Text("Disable battery optimization") }
+        }
+    }
+}
+
 @Composable
 private fun PermissionGate(requestPermission: () -> Unit, openAppSettings: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
