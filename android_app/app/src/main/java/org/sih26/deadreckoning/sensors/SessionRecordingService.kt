@@ -11,9 +11,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -142,7 +144,22 @@ class SessionRecordingService : Service() {
          * WAITING_FOR_GNSS with zero GNSS fixes), which is a real field-test trap:
          * without this, the only way to tell them apart is to notice fixes never
          * arrive at all. */
-        val gpsProviderEnabled: Boolean
+        val gpsProviderEnabled: Boolean,
+        /** Satellites currently in view of the GNSS chip, from
+         * [android.location.GnssStatus.getSatelliteCount], updated independently of
+         * whether a fix has ever been produced. This is the diagnostic a zero-fix
+         * session cannot otherwise give you: it separates "0 satellites in view"
+         * (antenna has no sky view - indoors, underground, deep urban canyon; no fix
+         * is possible no matter how long this runs) from "N in view, 0 used" (weak
+         * signal / multipath / still resolving ephemeris - a fix may still arrive)
+         * from "N in view, M used, still no Location callback" (a genuine
+         * registration or platform bug worth escalating, since the chip has
+         * everything it needs). Null until the first status update arrives - a real
+         * "no data yet" distinct from a real zero. */
+        val gnssSatellitesInView: Int?,
+        /** Of [gnssSatellitesInView], how many the chip is actually using toward a
+         * fix this update. Null alongside [gnssSatellitesInView]. */
+        val gnssSatellitesUsed: Int?
     )
 
     private lateinit var sensorManager: SensorManager
@@ -173,6 +190,34 @@ class SessionRecordingService : Service() {
     private var finalBlackoutDriftM: Double? = null
     private var lastSnapshot: FusionSnapshot? = null
     private var lastTelemetryPublishNs: Long = 0L
+    private var gnssSatellitesInView: Int? = null
+    private var gnssSatellitesUsed: Int? = null
+
+    /**
+     * Satellite-level visibility, independent of whether a fix has ever been
+     * produced. [LocationListener] only fires on a completed fix, so a phone that
+     * never gets one (indoors, deep urban canyon, no AGPS data yet) looks
+     * completely silent on that path alone - this is the callback that actually
+     * runs while "waiting for GNSS" is stuck, and the only way to tell "the chip
+     * sees nothing" from "the chip sees plenty but can't resolve a fix yet" from
+     * the field. Registered alongside [locationListener] in [startRecording],
+     * unregistered in [stopRecording]/[onDestroy].
+     */
+    private val gnssStatusCallback = object : GnssStatus.Callback() {
+        override fun onSatelliteStatusChanged(status: GnssStatus) {
+            val total = status.satelliteCount
+            var used = 0
+            for (i in 0 until total) if (status.usedInFix(i)) used++
+            gnssSatellitesInView = total
+            gnssSatellitesUsed = used
+            publishTelemetry()
+        }
+
+        override fun onStopped() {
+            gnssSatellitesInView = null
+            gnssSatellitesUsed = null
+        }
+    }
 
     private var sessionStartElapsedNs: Long = 0L
     private var latestMagnetometer: FloatArray? = null
@@ -417,7 +462,27 @@ class SessionRecordingService : Service() {
         // whole app would go down instead of showing the intended error message.
         // Calling it first with a "starting" notification, then tearing it down
         // cleanly on failure, satisfies the contract unconditionally.
-        startForeground(NOTIFICATION_ID, buildNotification())
+        //
+        // On API 34 (this app's targetSdk) calling startForeground() with a
+        // declared foregroundServiceType="location" is itself gated on location
+        // permission: with neither ACCESS_FINE_LOCATION nor ACCESS_COARSE_LOCATION
+        // granted, the platform throws a SecurityException
+        // (MissingForegroundServiceTypePermissionsException) out of this call,
+        // before the explicit permission check below ever runs. MainActivity's
+        // "Start recording" button is already gated on hasLocationPermission, so
+        // this is not reachable from the normal UI flow, but the service also
+        // accepts ACTION_START directly and permission can be revoked from system
+        // Settings between the button press and the service actually starting -
+        // both would have crashed the whole process here instead of reaching the
+        // intended "location permission not granted" error path. Caught explicitly
+        // so a missing permission always degrades to that message, never a crash.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: SecurityException) {
+            publishStatus("ERROR: location permission not granted (${e.message})")
+            stopSelf()
+            return
+        }
 
         if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
@@ -461,6 +526,8 @@ class SessionRecordingService : Service() {
         lastGnssAccuracyM = null
         lastSnapshot = null
         lastTelemetryPublishNs = 0L
+        gnssSatellitesInView = null
+        gnssSatellitesUsed = null
         fusionFailed = false
         pipeline = FusionPipeline()
 
@@ -488,6 +555,21 @@ class SessionRecordingService : Service() {
             locationListener,
             thread.looper
         )
+        // Best-effort: satellite visibility is diagnostic, not load-bearing, and
+        // must never take a recording down if registration fails for any reason
+        // (e.g. a chip/driver that does not support the callback).
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 30) {
+                // Run on the same sensor-ingest thread as everything else here
+                // (see this class's doc point 4), not the main executor, so a
+                // satellite-status update cannot race the IMU/GNSS state it reads
+                // and writes alongside.
+                locationManager.registerGnssStatusCallback({ command -> handler.post(command) }, gnssStatusCallback)
+            } else {
+                @Suppress("DEPRECATION")
+                locationManager.registerGnssStatusCallback(gnssStatusCallback, handler)
+            }
+        }
         publishTelemetry()
         handler.removeCallbacks(heartbeat)
         handler.postDelayed(heartbeat, 1000L)
@@ -497,6 +579,7 @@ class SessionRecordingService : Service() {
         handler.removeCallbacks(heartbeat)
         sensorManager.unregisterListener(sensorListener)
         locationManager.removeUpdates(locationListener)
+        runCatching { locationManager.unregisterGnssStatusCallback(gnssStatusCallback) }
         val droppedSamples = logger?.droppedSampleCount ?: 0
         val loggerFailed = logger?.failed ?: false
         logger?.close()
@@ -533,6 +616,13 @@ class SessionRecordingService : Service() {
     }
 
     override fun onDestroy() {
+        // Belt-and-suspenders: normally stopRecording() already did this, but
+        // onDestroy can run without it (process death, a system-triggered kill
+        // mid-recording) and an update delivered to a Handler on a thread that is
+        // about to quit is harmless but pointless to leave registered.
+        sensorManager.unregisterListener(sensorListener)
+        locationManager.removeUpdates(locationListener)
+        runCatching { locationManager.unregisterGnssStatusCallback(gnssStatusCallback) }
         logger?.close()
         releaseWakeLock()
         thread.quitSafely()
@@ -568,7 +658,9 @@ class SessionRecordingService : Service() {
             fusionFailed = fusionFailed,
             gpsProviderEnabled = runCatching {
                 locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-            }.getOrDefault(true)
+            }.getOrDefault(true),
+            gnssSatellitesInView = gnssSatellitesInView,
+            gnssSatellitesUsed = gnssSatellitesUsed
         )
         Handler(Looper.getMainLooper()).post { telemetryListener?.invoke(telemetry) }
     }

@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import org.sih26.deadreckoning.fusion.PipelinePhase
 import org.sih26.deadreckoning.sensors.SessionRecordingService
 import org.sih26.deadreckoning.sessions.SessionRecord
 import org.sih26.deadreckoning.sessions.SessionStore
@@ -284,13 +285,32 @@ private fun LiveScreen(
             return@Column
         }
 
+        val satelliteSuffix = if (t?.phase != PipelinePhase.RUNNING) {
+            satelliteStatusSuffix(t?.gnssSatellitesInView, t?.gnssSatellitesUsed)
+        } else ""
         val phase = when {
             t?.blackout == true -> "GNSS BLACKOUT"
             t?.gpsProviderEnabled == false -> "GPS IS OFF"
-            t?.waitingForMovement == true -> "WAITING FOR MOVEMENT"
-            else -> t?.phase?.name?.replace('_', ' ') ?: "STARTING"
+            t?.waitingForMovement == true -> "WAITING FOR MOVEMENT$satelliteSuffix"
+            else -> (t?.phase?.name?.replace('_', ' ') ?: "STARTING") + satelliteSuffix
         }
         PhaseCard(phase = phase, blackout = t?.blackout == true || t?.gpsProviderEnabled == false)
+
+        if (t?.gpsProviderEnabled != false && t?.gnssFixes == 0L && (t?.elapsedS ?: 0.0) > 20.0) {
+            val sats = t?.gnssSatellitesInView
+            ErrorBanner(
+                if (sats == null) {
+                    "No GNSS fix and no satellite data yet after ${duration(t?.elapsedS ?: 0.0)}. " +
+                        "If this persists, the GNSS chip may not be reporting status on this device."
+                } else if (sats == 0) {
+                    "No satellites in view after ${duration(t?.elapsedS ?: 0.0)}. The antenna likely has " +
+                        "no sky view - move outdoors or away from tall structures/vehicle roofs."
+                } else {
+                    "$sats satellite(s) in view, ${t?.gnssSatellitesUsed ?: 0} used, but no fix yet after " +
+                        "${duration(t?.elapsedS ?: 0.0)}. Weak signal or still resolving - keep waiting outdoors."
+                }
+            )
+        }
 
         if (t?.gpsProviderEnabled == false) {
             ErrorBanner("GPS is turned off in system settings. Enable location services - this looks identical to \"waiting for a fix\" otherwise.")
@@ -309,6 +329,10 @@ private fun LiveScreen(
                 MetricRow("Speed", "${t?.gnssSpeedMps?.let { fmt(it * 3.6) } ?: "--"} km/h", "Accuracy", "${t?.gnssAccuracyM?.let(::fmt) ?: "--"} m")
                 MetricRow("Distance", "${fmt((t?.distanceM ?: 0.0) / 1000)} km", "Elapsed", duration(t?.elapsedS ?: 0.0))
                 MetricRow("IMU samples", "${t?.imuSamples ?: 0}", "GNSS fixes", "${t?.gnssFixes ?: 0}")
+                MetricRow(
+                    "Satellites in view", "${t?.gnssSatellitesInView ?: "--"}",
+                    "Satellites used", "${t?.gnssSatellitesUsed ?: "--"}"
+                )
                 t?.snapshot?.let { snap ->
                     MetricRow("Heading", "${fmt(snap.headingDeg)} deg", "Drift", if (t.blackout) "${fmt(snap.driftMeters)} m (${fmt(snap.driftPercent)}%)" else "n/a - GNSS live")
                 }
@@ -501,6 +525,7 @@ private fun DiagnosticsScreen(t: SessionRecordingService.RecordingTelemetry?, fr
                 DiagRow("Waiting for moving fix", if (t?.waitingForMovement == true) "yes" else "no")
                 DiagRow("Software blackout", if (t?.blackout == true) "ACTIVE" else "off")
                 DiagRow("GPS provider (system setting)", if (t?.gpsProviderEnabled == false) "DISABLED" else "enabled")
+                DiagRow("Satellites in view / used", "${t?.gnssSatellitesInView ?: "no data yet"} / ${t?.gnssSatellitesUsed ?: "no data yet"}")
                 DiagRow("Dropped samples (writer behind)", "${t?.droppedSamples ?: 0}")
                 DiagRow("Storage write failed", if (t?.loggerFailed == true) "YES - not saving" else "no")
                 DiagRow("Fusion pipeline failed", if (t?.fusionFailed == true) "YES - raw-only" else "no")
@@ -535,6 +560,15 @@ private fun DiagRow(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.bodyMedium)
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+/** Short parenthetical appended to the phase label while still waiting for a fix,
+ * e.g. "WAITING FOR GNSS (0 sats)" vs "WAITING FOR GNSS (7 sats, 2 used)". Empty
+ * once running, since satellite count stops being the interesting number once a
+ * fix is already flowing. */
+private fun satelliteStatusSuffix(satellitesInView: Int?, satellitesUsed: Int?): String {
+    if (satellitesInView == null) return ""
+    return if (satellitesInView == 0) " (0 sats)" else " ($satellitesInView sats, ${satellitesUsed ?: 0} used)"
 }
 
 private fun fmt(value: Double) = String.format(Locale.ROOT, "%.2f", value)
