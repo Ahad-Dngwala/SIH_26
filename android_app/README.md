@@ -52,14 +52,17 @@ do with this code is open it in Android Studio and let Gradle sync**; that will
 surface anything wrong at the Android-API layer that `kotlinc` alone cannot see. Two
 known gaps to expect on that first sync:
 
-- No launcher icon set exists. The manifest points at a stock system drawable
-  (`@android:drawable/ic_menu_mylocation`) specifically so the project resource-links
-  without one; replace it via Android Studio's Asset Studio when there is time.
 - The Gradle/AGP/Kotlin plugin versions in `build.gradle.kts` are current as of this
   writing but were chosen without a live SDK to confirm against; if Android Studio
   reports an incompatible version, take its suggested fix - the specific version
   numbers are not load-bearing, only the min SDK (26) and the fact that `fusion/` has
   no Android imports are.
+- The notification's small icon still points at a stock system drawable
+  (`android.R.drawable.ic_menu_mylocation`); a status-bar icon needs the same
+  alpha-only-drawable constraints a launcher icon does not, and was left alone
+  rather than risk a malformed one with no way to render-check it here. The
+  launcher icon itself (`@mipmap/ic_launcher`, adaptive, `res/drawable/ic_launcher_*.xml`)
+  is a real icon now, not the stock placeholder.
 
 - [`app/`](app/README.md) - the Kotlin/Compose application.
 - [`native/`](native/README.md) - historical JNI/NDK notes; not part of the active

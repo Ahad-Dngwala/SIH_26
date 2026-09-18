@@ -282,7 +282,19 @@ class SessionRecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        if (intent == null) {
+            // System-triggered restart after the process was killed
+            // (START_STICKY delivers a null Intent here, distinct from any explicit
+            // action). In-memory fusion/leveling state cannot be reconstructed, so
+            // there is no session to resume - continuing to run would just be a
+            // silent background service doing nothing with no way for the user to
+            // stop it. Whatever was written to the JSONL before the kill survives
+            // on disk regardless and is picked up as a recovered session (see
+            // SessionStore.recoverOrphans) the next time the app is opened.
+            if (pipeline == null) stopSelf()
+            return START_NOT_STICKY
+        }
+        when (intent.action) {
             ACTION_START -> startRecording()
             ACTION_STOP -> stopRecording()
             ACTION_SET_BLACKOUT -> {

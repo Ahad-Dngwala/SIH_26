@@ -111,6 +111,17 @@ Implemented against the milestone above:
   use of the remaining time versus the recording/session/diagnostics gaps this
   pass closed. Confirmed deferred; the trajectory canvas's `TrackKind` enum is
   where a fourth matched-position source would plug in when that asset exists.
+- Hardened `onStartCommand` against a system-triggered restart (a null `Intent`,
+  delivered when `START_STICKY` restarts the service after the process was
+  killed): with no session in memory to resume, the service now stops itself
+  cleanly instead of lingering as a zombie background service with no
+  notification and no way for the user to stop it. Whatever was already written
+  to the JSONL survives on disk regardless and is picked up by orphan recovery.
+- Replaced the stock system launcher icon with a real adaptive icon (a compass
+  needle motif - heading-without-GNSS is what the whole app does -
+  `res/drawable/ic_launcher_*.xml`, `res/mipmap-anydpi-v26/`). The notification's
+  small icon still points at a stock drawable; see `android_app/README.md` for
+  why that one was left alone.
 - Deferred, deliberately: MapLibre/offline vector tiles, ONNX model inference,
   Room, and live HMM/Viterbi map matching remain out of scope per the "Current
   implementation direction" note above. A future increment can layer a matched

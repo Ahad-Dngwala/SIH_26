@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Compass needle motif: the app's whole job is holding a heading estimate
+     without GNSS, so a needle rather than a location pin or a generic car icon.
+     Content is kept within adaptive icon's ~66dp safe zone, centered in the
+     108dp canvas, so masking/parallax on any launcher shape does not clip it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer compass ring, drawn as two semicircle arcs since a single arc
+         command cannot span a full 360 degrees. -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#8FD3FF"
+        android:strokeWidth="4"
+        android:pathData="M54,20 A34,34 0 1,1 54,88 A34,34 0 1,1 54,20" />
+    <!-- Needle: bright half points the current heading, dim half is the tail -->
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M54,26 L64,58 L54,50 Z" />
+    <path
+        android:fillColor="#294F6D"
+        android:pathData="M54,82 L44,58 L54,66 Z" />
+    <!-- Pivot -->
+    <path
+        android:fillColor="#EAF6FF"
+        android:pathData="M54,54 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+</vector>
