@@ -3,8 +3,10 @@ package org.sih26.deadreckoning
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,10 +44,19 @@ import java.util.Locale
 private enum class Tab(val label: String) { LIVE("Live"), SESSIONS("Sessions"), DIAGNOSTICS("Diagnostics") }
 
 class MainActivity : ComponentActivity() {
-    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    // Read reactively from Compose so the UI updates the moment permission state
+    // changes, whether that's the in-app request dialog resolving or the person
+    // granting it from system Settings and coming back (onResume, not onCreate,
+    // catches that second path - see hasLocationPermission()).
+    private var hasLocationPermission by mutableStateOf(false)
+
+    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        hasLocationPermission = hasLocationPermission()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hasLocationPermission = hasLocationPermission()
         val required = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
@@ -57,6 +68,10 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
                     App(
+                        hasLocationPermission = hasLocationPermission,
+                        requestPermission = { permissions.launch(required) },
+                        openAppSettings = ::openAppSettings,
+                        freeStorageBytes = { getExternalFilesDir(null)?.freeSpace ?: Long.MAX_VALUE },
                         start = { ContextCompat.startForegroundService(this, intent(SessionRecordingService.ACTION_START)) },
                         stop = { startService(intent(SessionRecordingService.ACTION_STOP)) },
                         blackout = { active -> startService(intent(SessionRecordingService.ACTION_SET_BLACKOUT).putExtra(SessionRecordingService.EXTRA_BLACKOUT_ACTIVE, active)) },
@@ -67,6 +82,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Catches granting the permission from the system Settings screen, which
+        // resumes this activity without going through the permissions launcher's
+        // own callback above.
+        hasLocationPermission = hasLocationPermission()
+    }
+
+    private fun hasLocationPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+        )
     }
 
     private fun intent(action: String) = Intent(this, SessionRecordingService::class.java).setAction(action)
@@ -88,6 +120,10 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun App(
+    hasLocationPermission: Boolean,
+    requestPermission: () -> Unit,
+    openAppSettings: () -> Unit,
+    freeStorageBytes: () -> Long,
     start: () -> Unit,
     stop: () -> Unit,
     blackout: (Boolean) -> Unit,
@@ -133,6 +169,10 @@ private fun App(
             when (tab) {
                 Tab.LIVE -> LiveScreen(
                     t = telemetry, trail = trail,
+                    hasLocationPermission = hasLocationPermission,
+                    requestPermission = requestPermission,
+                    openAppSettings = openAppSettings,
+                    freeStorageBytes = freeStorageBytes,
                     start = { trail.clear(); start() }, stop = stop, blackout = blackout
                 )
                 Tab.SESSIONS -> SessionsScreen(records, export) { record ->
@@ -145,20 +185,58 @@ private fun App(
     }
 }
 
+/** Below this much free space on the session storage volume, a recording is
+ * refused outright rather than started only to run out mid-drive: JSONL logging
+ * is continuous for the whole session and a multi-hour drive at 100 Hz is
+ * megabytes, not kilobytes. Chosen generously below any single realistic session
+ * size rather than tuned to a measured rate, since refusing a demo recording
+ * over a false positive is worse than the disk actually filling. */
+private const val MIN_FREE_STORAGE_BYTES = 50L * 1024 * 1024
+
 @Composable
 private fun LiveScreen(
     t: SessionRecordingService.RecordingTelemetry?,
     trail: List<TrackPoint>,
+    hasLocationPermission: Boolean,
+    requestPermission: () -> Unit,
+    openAppSettings: () -> Unit,
+    freeStorageBytes: () -> Long,
     start: () -> Unit,
     stop: () -> Unit,
     blackout: (Boolean) -> Unit
 ) {
     val recording = t?.recording == true
+    var lowStorageWarningMb by remember { mutableStateOf<Long?>(null) }
+
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("SIH26 Field Test", style = MaterialTheme.typography.headlineSmall)
 
-        Button(onClick = { if (recording) stop() else start() }, modifier = Modifier.fillMaxWidth()) {
+        if (!hasLocationPermission) {
+            PermissionGate(requestPermission, openAppSettings)
+            return@Column
+        }
+
+        Button(
+            onClick = {
+                if (recording) {
+                    stop()
+                } else {
+                    val freeMb = freeStorageBytes() / (1024 * 1024)
+                    if (freeStorageBytes() < MIN_FREE_STORAGE_BYTES) lowStorageWarningMb = freeMb else start()
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text(if (recording) "Stop recording" else "Start recording")
+        }
+
+        lowStorageWarningMb?.let { freeMb ->
+            AlertDialog(
+                onDismissRequest = { lowStorageWarningMb = null },
+                title = { Text("Low storage") },
+                text = { Text("Only ${freeMb} MB free. A field-test recording logs continuously for the whole drive - free up space first rather than risk it running out mid-session.") },
+                confirmButton = { TextButton({ lowStorageWarningMb = null }) { Text("OK") } }
+            )
         }
 
         if (!recording) {
@@ -213,6 +291,44 @@ private fun LiveScreen(
                 Text("Withholds fixes from the filter only; raw GNSS keeps logging as truth.", style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = t?.blackout == true, onCheckedChange = blackout)
+        }
+    }
+}
+
+/**
+ * Shown in place of the recording controls when location permission is missing.
+ *
+ * Before this, tapping "Start recording" without it granted did nothing visible:
+ * the service checked the permission internally and stopped itself with only a
+ * log-level status message nobody was looking at (`Diagnostics` is deliberately
+ * off the main screen). On a borrowed demo device where the permission dialog
+ * gets dismissed by accident, that reads as "the app is broken" rather than "grant
+ * a permission" - exactly the failure mode a bottom-of-the-stack error message is
+ * built to avoid. [requestPermission] re-shows the system dialog for a first
+ * denial; once the OS considers it permanently denied, that dialog silently
+ * no-ops instead of reappearing, which is what [openAppSettings] is for.
+ */
+@Composable
+private fun PermissionGate(requestPermission: () -> Unit, openAppSettings: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Location permission needed", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Recording needs GPS fixes as the drift ground truth. Grant location " +
+                    "access to start.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Button(onClick = requestPermission, modifier = Modifier.fillMaxWidth()) {
+                Text("Grant permission")
+            }
+            OutlinedButton(onClick = openAppSettings, modifier = Modifier.fillMaxWidth()) {
+                Text("Open app settings")
+            }
+            Text(
+                "If the permission dialog stopped appearing, it was likely denied " +
+                    "permanently - use \"Open app settings\" and enable location there instead.",
+                style = MaterialTheme.typography.bodySmall
+            )
         }
     }
 }
