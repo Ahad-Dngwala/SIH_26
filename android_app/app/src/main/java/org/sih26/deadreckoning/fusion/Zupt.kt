@@ -42,16 +42,22 @@ data class ZuptConfig(
      * reference uses 10 at its 10 Hz cycle rate; this is the same duration at the
      * phone's rate, not a different decision. */
     val windowN: Int = 100,
-    val accelVarThreshold: Double = 0.02,
-    val gyroVarThreshold: Double = 0.002,
+    val accelVarThreshold: Double = 0.05,
+    val gyroVarThreshold: Double = 0.01,
     /** Mean horizontal specific force must also be below this. On synthetic data this
      * is the only condition doing real work, and note carefully that it does not
      * catch a vehicle cruising in a straight line at constant speed. */
-    val accelMagnitudeThreshold: Double = 0.3,
+    val accelMagnitudeThreshold: Double = 0.8,
     /** Tight, because a detected stop really is a near-exact measurement. Not zero,
      * because the detector can be wrong. */
     val rMps: Double = 0.05,
-    val enabled: Boolean = false
+    // Measured from a real stationary window (AndroidAppReadingsAnalysis.md session
+    // 2, t=38-65s, GNSS speed 0.00 m/s, accel variance <0.02): enabling this with the
+    // thresholds above clamped the 355 m of stationary drift that window produced
+    // with ZUPT off. The docstring above still applies to the synthetic benchmark
+    // this class was originally tuned against; this default is the phone's, backed by
+    // the phone recording rather than the synthetic one.
+    val enabled: Boolean = true
 )
 
 /** What the gate actually saw. Log this during a recording; it is the raw material

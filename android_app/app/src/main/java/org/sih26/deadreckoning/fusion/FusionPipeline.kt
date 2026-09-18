@@ -62,11 +62,33 @@ enum class PipelinePhase {
 }
 
 data class PipelineConfig(
-    val fusion: FusionConfig = FusionConfig(),
+    // gnssReacquireRMultiplierStart overridden from FusionConfig's own default of 50.0
+    // (2500x variance) down to 5.0 (25x). At 50.0, GNSS position is blinded for the
+    // whole 2.5 s reacquire ramp while a drifted Channel A speed keeps pulling
+    // position on the stale heading, which is what produced the 60+ m/s reacquisition
+    // loops in AndroidAppReadingsAnalysis.md. This is set here rather than in
+    // FusionConfig's own default because tools/parity/generate_fixture.py and
+    // VerifyParity.kt both instantiate FusionConfig() directly to check Kotlin against
+    // the Python reference bit-for-bit; changing the shared default would silently
+    // break that fixture. The pipeline every phone build actually runs is this class,
+    // so overriding it here changes real behavior without touching parity.
+    val fusion: FusionConfig = FusionConfig(gnssReacquireRMultiplierStart = 5.0),
     val physics: PhysicsSpeedConfig = PhysicsSpeedConfig(),
     val zupt: ZuptConfig = ZuptConfig(),
     /** Seconds of stationary samples required before leveling. */
     val levelingWindowS: Double = 3.0,
+    /** Gyro magnitude above this during leveling means the phone is being held or
+     * handled, not resting on the mount. Session 2 of AndroidAppReadingsAnalysis.md
+     * started leveling while being handled (mean yaw rate 11.6 deg/s, peak 35 deg/s,
+     * i.e. 0.2-0.61 rad/s) and the resulting "up" vector carried a 0.58 m/s^2
+     * horizontal bias into every subsequent Channel P integration for the rest of the
+     * session. A stationary phone's gyro noise floor sits well under this. */
+    val levelingGyroQuietThresholdRadS: Double = 0.05,
+    /** Bound on how long to keep restarting the leveling window in search of a quiet
+     * one before giving up and leveling on whatever was collected anyway. Mirrors
+     * maxWaitForMovingFixS below: a session that is handled throughout still has to
+     * start eventually, but [levelingTrusted] says whether the result should be. */
+    val maxLevelingWaitS: Double = 15.0,
     /** Speed above which a GNSS bearing is trusted for initial heading. At a
      * standstill the bearing is noise. */
     val minSpeedForBearingMps: Double = 1.5,
@@ -107,6 +129,13 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
     var headingSeedTrusted: Boolean = false
         private set
 
+    /** False when leveling had to complete on a window that never went quiet within
+     * [PipelineConfig.maxLevelingWaitS]. Surface it: a session leveled this way likely
+     * carries a horizontal-accel bias into Channel P for its entire duration, since
+     * leveling happens once and is never redone. */
+    var levelingTrusted: Boolean = true
+        private set
+
     /** `WAITING_FOR_GNSS` covers two real states. Once a local frame exists, the
      * remaining prerequisite is a moving GNSS fix whose bearing can seed heading. */
     val waitingForMovingFix: Boolean
@@ -125,6 +154,7 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
 
     private val levelingWindow = ArrayList<DoubleArray>()
     private var levelingStartNs: Long? = null
+    private var levelingWaitStartNs: Long? = null
 
     private var lastImuNs: Long? = null
     private var sessionStartNs: Long? = null
@@ -237,10 +267,25 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
         when (phase) {
             PipelinePhase.LEVELING -> {
                 if (levelingStartNs == null) levelingStartNs = tNs
+                if (levelingWaitStartNs == null) levelingWaitStartNs = tNs
+
+                // A sample above the quiet threshold means the window collected so
+                // far includes handling motion, not just gravity: restart it here
+                // rather than average that motion into the "up" vector.
+                val gyroMagnitude = LinAlg.norm(gyro)
+                if (gyroMagnitude > config.levelingGyroQuietThresholdRadS) {
+                    levelingWindow.clear()
+                    levelingStartNs = tNs
+                }
                 levelingWindow.add(accel.copyOf())
+
                 val elapsed = (tNs - levelingStartNs!!) / NANOS_PER_SECOND
-                if (elapsed >= config.levelingWindowS && levelingWindow.size >= 2) {
+                val totalWaited = (tNs - levelingWaitStartNs!!) / NANOS_PER_SECOND
+                val gaveUp = totalWaited >= config.maxLevelingWaitS
+
+                if ((elapsed >= config.levelingWindowS || gaveUp) && levelingWindow.size >= 2) {
                     leveling = MountLeveling.fromStationaryWindow(levelingWindow)
+                    levelingTrusted = elapsed >= config.levelingWindowS
                     levelingWindow.clear()
                     phase = PipelinePhase.WAITING_FOR_GNSS
                 }
@@ -442,7 +487,12 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
         } else {
             0.0
         }
-        val driftPercent = if (blackout && blackoutDistanceM > 1.0) {
+        // Below this the metric is dividing by GPS noise, not distance: consumer GNSS
+        // fix noise alone is 3-5 m, so at 1.1 m of blackout travel the ~4 m of that
+        // noise reads as a 363% drift before the vehicle has gone anywhere. Waiting
+        // for 15 m of blackout travel keeps the denominator meaningfully larger than
+        // the fix noise it is being divided against.
+        val driftPercent = if (blackout && blackoutDistanceM > 15.0) {
             driftMeters / blackoutDistanceM * 100.0
         } else {
             0.0
