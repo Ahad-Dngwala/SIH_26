@@ -96,7 +96,7 @@ def load_session(session_name, auto_sync=True, verbose_ts=False):
     # Also require valid lat/lon
     valid_pos = s_df[col_lat].notna() & s_df[col_lon].notna()
     s_df = s_df[valid_pos].reset_index(drop=True)
-    s_time_recon = s_time_recon[valid_pos.values[unique_idx]]
+    s_time_recon = s_time_recon[valid_pos.values]
 
     # Zero-reference the phone time
     s_time = s_time_recon - s_time_recon[0]
