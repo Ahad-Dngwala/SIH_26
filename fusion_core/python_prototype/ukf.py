@@ -114,6 +114,10 @@ def hx_position_velocity(x: np.ndarray) -> np.ndarray:
 def hx_velocity(x: np.ndarray) -> np.ndarray:
     return np.array([x[VN], x[VE]])
 
+def hx_speed(x: np.ndarray) -> np.ndarray:
+    """Scalar speed measurement, independent of heading direction."""
+    return np.array([np.hypot(x[VN], x[VE])])
+
 
 def hx_zupt(x: np.ndarray) -> np.ndarray:
     return np.array([x[VN], x[VE]])
@@ -146,11 +150,11 @@ def residual_angle_safe(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a - b
 
 def residual_z(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    res = a - b
-    # Only wrap if it's a 1D heading measurement
-    if len(res) == 1:
-        res[0] = (res[0] + np.pi) % (2 * np.pi) - np.pi
-    return res
+    """
+    Standard linear residual.
+    We do NOT wrap 1D measurements because our 1D measurements are SPEED, not heading.
+    """
+    return a - b
 
 @dataclass
 class FusionConfig:
@@ -205,6 +209,7 @@ class FusionConfig:
     # Measurement noise, nominal (Section 5.3).
     r_gnss_pos: float = 3.0  # meters, 1-sigma
     r_gnss_vel: float = 0.3  # m/s, 1-sigma
+    covariance_decoupling: bool = True
     r_channel_a: float = 0.5  # m/s, 1-sigma - Channel A target RMSE (Section 4.2)
     r_channel_b: float = 1.75  # m/s, 1-sigma - mid Section 4.3's 1.5-2.0 m/s target band
     # GNSS course over ground, 1-sigma in radians. 0.05 rad is about 3
@@ -507,18 +512,30 @@ class DualChannelUkf:
             else:
                 r_channel_a = self._channel_a_r(channel_a_speed, channel_b_speed)
 
-            z_a = np.array(
-                [channel_a_speed * np.cos(psi_hat), channel_a_speed * np.sin(psi_hat)]
-            )
-            self.ukf.update(z_a, R=np.eye(2) * r_channel_a**2, hx=hx_velocity)
+            z_a = np.array([channel_a_speed])
+            
+            # Covariance Decoupling: Prevent scalar speed measurement from causing heading/bias windup
+            # by zeroing the cross-covariance between Cartesian velocity and angular states.
+            if self.config.covariance_decoupling:
+                for ang_idx in [PSI, BG, BA]:
+                    for vel_idx in [VN, VE]:
+                        self.ukf.P[ang_idx, vel_idx] = 0.0
+                        self.ukf.P[vel_idx, ang_idx] = 0.0
+                    
+            self.ukf.update(z_a, R=np.array([[r_channel_a**2]]), hx=hx_speed)
             self._symmetrize_p()
             self._refresh_sigmas()
 
         if channel_b_speed is not None:
-            z_b = np.array(
-                [channel_b_speed * np.cos(psi_hat), channel_b_speed * np.sin(psi_hat)]
-            )
-            self.ukf.update(z_b, R=np.eye(2) * c.r_channel_b**2, hx=hx_velocity)
+            z_b = np.array([channel_b_speed])
+            
+            if self.config.covariance_decoupling:
+                for ang_idx in [PSI, BG, BA]:
+                    for vel_idx in [VN, VE]:
+                        self.ukf.P[ang_idx, vel_idx] = 0.0
+                        self.ukf.P[vel_idx, ang_idx] = 0.0
+                    
+            self.ukf.update(z_b, R=np.array([[c.r_channel_b**2]]), hx=hx_speed)
             self._symmetrize_p()
 
         # Zero-velocity update. Applied after the velocity channels so

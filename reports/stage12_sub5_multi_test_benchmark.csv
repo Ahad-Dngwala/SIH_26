@@ -1,0 +1,11 @@
+test_name,t_start_s,duration_s,ref_dist_m,endpoint_err_m,drift_pct,heading_err_deg,sub_5_status
+Official Benchmark (60s),4693.8,60.0,370.34,8.255,2.229,0.08,PASS (<5%)
+Window Offset -2.0s (60s),4691.8,60.0,368.25,4.291,1.165,0.68,PASS (<5%)
+Window Offset -1.0s (60s),4692.8,60.0,370.06,6.82,1.843,0.16,PASS (<5%)
+Window Offset +1.0s (60s),4694.8,60.0,370.22,8.79,2.374,0.13,PASS (<5%)
+Window Offset +2.0s (60s),4695.8,60.0,370.02,10.243,2.768,0.94,PASS (<5%)
+Window Offset +3.0s (60s),4696.8,60.0,369.95,10.81,2.922,0.94,PASS (<5%)
+Window Offset +4.0s (60s),4697.8,60.0,370.15,9.753,2.635,0.94,PASS (<5%)
+Window Offset +5.0s (60s),4698.8,60.0,370.6,8.467,2.285,0.64,PASS (<5%)
+Duration 58s Blackout,4693.8,58.0,342.79,4.291,1.252,0.68,PASS (<5%)
+Duration 55s Blackout,4693.8,55.0,302.97,2.395,0.791,0.05,PASS (<5%)
