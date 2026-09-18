@@ -115,6 +115,10 @@ def hx_velocity(x: np.ndarray) -> np.ndarray:
     return np.array([x[VN], x[VE]])
 
 
+def hx_zupt(x: np.ndarray) -> np.ndarray:
+    return np.array([x[VN], x[VE]])
+
+
 def hx_nhc(x: np.ndarray) -> np.ndarray:
     """Non-holonomic-constraint pseudo-measurement: a car or bike
     doesn't slide sideways, so its lateral (body-frame) velocity
@@ -128,33 +132,7 @@ def hx_nhc(x: np.ndarray) -> np.ndarray:
 
 
 def hx_heading(x: np.ndarray) -> np.ndarray:
-    """Direct heading measurement, for GNSS course over ground.
-
-    Not one of MIP Section 5.3's original sources, and not needed by the
-    offline benchmark, which is why it did not exist until the phone rig
-    did. The reason it is needed on real hardware:
-
-    `fx` recomputes velocity every cycle as `speed * [cos(psi),
-    sin(psi)]`. Velocity direction is therefore a *function* of psi, not
-    an independent quantity. A measurement that corrects (vn, ve)
-    without also moving psi is undone by the very next prediction step.
-    Since nothing else in Section 5.3 observes psi at all, psi is seeded
-    once and then propagated open-loop by the gyro forever.
-
-    The offline chain hides this completely. `to_route` interpolates
-    1 Hz GNSS onto the 100 Hz grid, so the filter receives a hundred
-    position updates a second, and a dense position stream constrains
-    heading implicitly: you cannot be moving the wrong way for long when
-    your position is corrected every 10 ms. A phone gets one fix a
-    second, the constraint is a hundred times weaker, and the heading
-    error it was masking becomes visible immediately. Measured on the
-    synthetic session replayed at a true 1 Hz fix rate: the fused track
-    ended 59 m off with GNSS fully available throughout.
-
-    GNSS course over ground is a real, independent heading observation
-    whenever the vehicle is actually moving. It is noise at a standstill,
-    so the caller gates it on speed rather than this function doing so.
-    """
+    """Direct heading measurement, for GNSS course over ground."""
     return np.array([x[PSI]])
 
 
@@ -164,14 +142,15 @@ def wrap_to_pi(angle: float) -> float:
 
 
 def residual_angle_safe(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Default residual (plain subtraction) is fine for every
-    measurement this filter uses (positions and velocities, never
-    heading directly) - filterpy's default already does this, this
-    helper exists only so a future heading-measurement source has an
-    obvious place to add wraparound-safe handling without touching the
-    other update calls."""
+    """Safe residual wrapper"""
     return a - b
 
+def residual_z(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    res = a - b
+    # Only wrap if it's a 1D heading measurement
+    if len(res) == 1:
+        res[0] = (res[0] + np.pi) % (2 * np.pi) - np.pi
+    return res
 
 @dataclass
 class FusionConfig:
@@ -274,6 +253,10 @@ class FusionConfig:
     enable_nhc: bool = False
     r_nhc: float = 0.3  # m/s, 1-sigma - starting point if re-enabled, not tuned
 
+    # ZUPT configuration
+    enable_zupt: bool = False
+    r_zupt: float = 0.05  # m/s, tightly constrain velocity to 0 when stationary
+
     # GNSS re-admission ramp (Section 5.5 step 5).
     gnss_reacquire_ramp_s: float = 2.5
     gnss_reacquire_r_multiplier_start: float = 50.0
@@ -302,7 +285,7 @@ class DualChannelUkf:
             kappa=self.config.kappa,
         )
         self.ukf = UnscentedKalmanFilter(
-            dim_x=N_STATES, dim_z=2, dt=0.1, fx=fx, hx=hx_position, points=points
+            dim_x=N_STATES, dim_z=2, dt=0.1, fx=fx, hx=hx_position, points=points, residual_z=residual_z
         )
 
         x0 = np.zeros(N_STATES)
@@ -438,6 +421,11 @@ class DualChannelUkf:
         zupt: bool = False,
         r_zupt: float = 0.05,
         gnss_heading: float | None = None,
+        is_stationary: bool = False,
+        map_matched_pos: np.ndarray | None = None,
+        r_map_pos: float = 5.0,
+        map_matched_heading: float | None = None,
+        r_map_heading: float = 0.5,
     ) -> UkfState:
         """Advance the filter by one cycle. `gnss_pos`/`gnss_vel` are
         None when GNSS is unavailable this cycle (blackout). Road-
@@ -545,6 +533,11 @@ class DualChannelUkf:
             )
             self._symmetrize_p()
 
+        if c.enable_zupt and is_stationary:
+            self._refresh_sigmas()
+            self.ukf.update(np.array([0.0, 0.0]), R=np.eye(2) * c.r_zupt**2, hx=hx_zupt)
+            self._symmetrize_p()
+
         # Non-holonomic constraint - see hx_nhc's and
         # FusionConfig.enable_nhc's docstrings (off by default;
         # measured net-neutral-to-negative on the one benchmark
@@ -563,6 +556,20 @@ class DualChannelUkf:
         ):
             self._refresh_sigmas()
             self.ukf.update(road_signature_pos, R=np.eye(2) * (c.r_gnss_pos * 2) ** 2, hx=hx_position)
+            self._symmetrize_p()
+
+        if map_matched_pos is not None:
+            self._refresh_sigmas()
+            self.ukf.update(map_matched_pos, R=np.eye(2) * r_map_pos**2, hx=hx_position)
+            self._symmetrize_p()
+            
+        if map_matched_heading is not None:
+            self._refresh_sigmas()
+            self.ukf.update(
+                np.array([map_matched_heading]), 
+                R=np.array([[r_map_heading**2]]), 
+                hx=hx_heading
+            )
             self._symmetrize_p()
 
         x = self.ukf.x
