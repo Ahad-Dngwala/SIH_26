@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import org.sih26.deadreckoning.MainActivity
@@ -56,6 +57,12 @@ import java.io.File
  * 6. The blackout is simulated in software. GNSS keeps arriving and keeps being
  *    logged the entire time; only whether it reaches the filter is gated. Airplane
  *    mode would destroy the withheld ground truth and cost 10-30s of reacquisition.
+ * 7. A foreground notification keeps the process alive, but several OEM battery
+ *    managers still throttle sensor *delivery rate* under Doze once the screen is
+ *    off, independent of whether the process is killed. A partial [PowerManager.WakeLock]
+ *    is held for the duration of the recording (see [wakeLock]) so a real unattended
+ *    drive with the screen off is not silently sampled at a lower rate than the one
+ *    this project's numbers were measured against.
  */
 class SessionRecordingService : Service() {
 
@@ -110,6 +117,14 @@ class SessionRecordingService : Service() {
     private lateinit var locationManager: LocationManager
     private lateinit var thread: HandlerThread
     private lateinit var handler: Handler
+
+    /** Held only between [startRecording] and [stopRecording]/[onDestroy], never
+     * acquired at [onCreate] time - a service that exists but is not recording has
+     * no reason to keep the CPU awake. Timed out generously (max session length a
+     * field test would plausibly run unattended) as a backstop against a code path
+     * that fails to release it; a genuinely longer recording simply reacquires
+     * nothing since the lock is already held and Android does not double-count. */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private var logger: SessionLogger? = null
     private var pipeline: FusionPipeline? = null
@@ -315,6 +330,14 @@ class SessionRecordingService : Service() {
 
         startForeground(NOTIFICATION_ID, buildNotification())
 
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sih26:recording").apply {
+            setReferenceCounted(false)
+            // 6 hours: far beyond any real field test, just a backstop, not a
+            // planned session length.
+            acquire(6 * 60 * 60 * 1000L)
+        }
+
         sessionStartElapsedNs = android.os.SystemClock.elapsedRealtimeNanos()
         lastAccel = null
         lastGyro = null
@@ -381,13 +404,20 @@ class SessionRecordingService : Service() {
         logger = null
         pipeline = null
         blackoutActive = false
+        releaseWakeLock()
         publishTelemetry()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
+
     override fun onDestroy() {
         logger?.close()
+        releaseWakeLock()
         thread.quitSafely()
         super.onDestroy()
     }

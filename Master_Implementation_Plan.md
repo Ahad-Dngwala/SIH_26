@@ -78,6 +78,18 @@ Implemented against the milestone above:
   (`FusionPipeline.describeFrontEnd()`, previously wired to a listener nothing
   read) plus per-cycle IMU rate, filter step latency, ZUPT state, Channel P speed,
   and all three track positions, unrounded.
+- Added a partial `PowerManager.WakeLock` held for the duration of a recording
+  (`SessionRecordingService`, acquired on start, released on stop/destroy, 6-hour
+  backstop timeout). The foreground notification keeps the process alive, but does
+  not by itself stop OEM Doze/battery managers throttling sensor delivery rate once
+  the screen is off; this closes that gap for an unattended drive.
+- Added orphan-session recovery (`SessionStore.recoverOrphans`): any `.jsonl` this
+  app ever created is real data whether or not the process lived long enough to
+  write its sidecar. A crash, force-stop, or OS kill under memory pressure now
+  surfaces as a recovered session (summary re-derived from the raw log) the next
+  time the Sessions tab is opened, rather than data silently sitting on disk that
+  the app claims does not exist. A currently-recording session is excluded via a
+  file-freshness check so this cannot race the active recording.
 - Deferred, deliberately: MapLibre/offline vector tiles, ONNX model inference,
   Room, and live HMM/Viterbi map matching remain out of scope per the "Current
   implementation direction" note above. A future increment can layer a matched
