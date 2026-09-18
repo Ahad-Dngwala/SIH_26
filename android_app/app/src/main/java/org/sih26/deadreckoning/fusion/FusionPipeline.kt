@@ -69,7 +69,7 @@ data class PipelineConfig(
     val levelingWindowS: Double = 3.0,
     /** Speed above which a GNSS bearing is trusted for initial heading. At a
      * standstill the bearing is noise. */
-    val minSpeedForBearingMps: Double = 3.0,
+    val minSpeedForBearingMps: Double = 0.0,
     /** How long to wait for a fix above that speed before giving up and seeding the
      * heading from whatever bearing is available. A session that never moves has no
      * dead reckoning to measure anyway, but the pipeline should still start and say
