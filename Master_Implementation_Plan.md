@@ -38,6 +38,22 @@ The historical sections below remain useful for the broader proposed system, but
 their implementation details must not be used to resurrect deferred components in
 the active demo without an explicit decision.
 
+### Field-test readiness milestone (2026-09-18)
+
+The next Android increment is field usability, not a fusion rewrite. The app must
+make the existing pipeline observable (`LEVELING`, waiting for GNSS, waiting for a
+moving fix, running, blackout), keep records after app closure, present completed
+sessions, and export the unchanged JSONL artifact through Android sharing. Use
+sidecar metadata files and a lightweight in-app trajectory canvas rather than Room
+or an online map dependency. The canvas must label and retain GNSS truth, raw fused
+positions, and any future map-matched positions separately.
+
+The offline `tools/map_matching/` prototype is research/support tooling. It may
+inform a future greedy on-device matcher only after a corridor has been pre-extracted
+into a shipped offline asset and a test proves that it cannot alter raw UKF drift
+measurement. It must not be used as a UKF correction or require network access in
+the field-test build.
+
 ---
 
 ## 0. System Summary (read this first)

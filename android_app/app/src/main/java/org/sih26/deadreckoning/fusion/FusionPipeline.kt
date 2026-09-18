@@ -107,6 +107,11 @@ class FusionPipeline(val config: PipelineConfig = PipelineConfig()) {
     var headingSeedTrusted: Boolean = false
         private set
 
+    /** `WAITING_FOR_GNSS` covers two real states. Once a local frame exists, the
+     * remaining prerequisite is a moving GNSS fix whose bearing can seed heading. */
+    val waitingForMovingFix: Boolean
+        get() = phase == PipelinePhase.WAITING_FOR_GNSS && localFrame != null
+
     private val forwardAxis = ForwardAxisEstimator()
     private val channelP = PhysicsSpeedChannel(config.physics)
     private val zuptDetector = ZuptDetector(config.zupt)

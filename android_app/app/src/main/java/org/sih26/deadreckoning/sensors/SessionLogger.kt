@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * `PhoneSession.sanity_report()` already detects and flags.
  */
 class SessionLogger(
-    outputFile: File,
+    val outputFile: File,
     device: String,
     notes: String,
     private val queueCapacity: Int = 20_000

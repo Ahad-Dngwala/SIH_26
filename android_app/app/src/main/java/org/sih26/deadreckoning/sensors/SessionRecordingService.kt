@@ -25,6 +25,9 @@ import org.sih26.deadreckoning.MainActivity
 import org.sih26.deadreckoning.R
 import org.sih26.deadreckoning.fusion.FusionPipeline
 import org.sih26.deadreckoning.fusion.FusionSnapshot
+import org.sih26.deadreckoning.fusion.PipelinePhase
+import org.sih26.deadreckoning.sessions.SessionRecord
+import org.sih26.deadreckoning.sessions.SessionStore
 import java.io.File
 
 /**
@@ -82,7 +85,26 @@ class SessionRecordingService : Service() {
 
         @Volatile
         var statusListener: ((String) -> Unit)? = null
+
+        @Volatile
+        var telemetryListener: ((RecordingTelemetry) -> Unit)? = null
     }
+
+    /** UI-facing diagnostics; it mirrors pipeline state instead of inventing a
+     * second lifecycle state machine. */
+    data class RecordingTelemetry(
+        val recording: Boolean,
+        val phase: PipelinePhase?,
+        val waitingForMovement: Boolean,
+        val blackout: Boolean,
+        val elapsedS: Double,
+        val distanceM: Double,
+        val imuSamples: Long,
+        val gnssFixes: Long,
+        val gnssSpeedMps: Double?,
+        val gnssAccuracyM: Double?,
+        val snapshot: FusionSnapshot?
+    )
 
     private lateinit var sensorManager: SensorManager
     private lateinit var locationManager: LocationManager
@@ -91,6 +113,19 @@ class SessionRecordingService : Service() {
 
     private var logger: SessionLogger? = null
     private var pipeline: FusionPipeline? = null
+    private lateinit var sessionStore: SessionStore
+    private var sessionId: String? = null
+    private var sessionStartedUtc: String = ""
+    private var gnssFixes: Long = 0
+    private var distanceM: Double = 0.0
+    private var lastGnssTimestampNs: Long? = null
+    private var lastGnssSpeedMps: Double? = null
+    private var lastGnssAccuracyM: Double? = null
+    private var blackoutStartedNs: Long? = null
+    private var blackoutDurationS: Double = 0.0
+    private var finalBlackoutDriftM: Double? = null
+    private var lastSnapshot: FusionSnapshot? = null
+    private var lastTelemetryPublishNs: Long = 0L
 
     private var sessionStartElapsedNs: Long = 0L
     private var latestMagnetometer: FloatArray? = null
@@ -152,8 +187,16 @@ class SessionRecordingService : Service() {
             doubleArrayOf(gyro[0].toDouble(), gyro[1].toDouble(), gyro[2].toDouble())
         )
         if (snapshot != null) {
+            lastSnapshot = snapshot
+            if (blackoutActive) finalBlackoutDriftM = snapshot.driftMeters
             logger?.logFused(snapshot.tSeconds, snapshot.fusedNorth, snapshot.fusedEast)
             publishSnapshot(snapshot)
+            // Compose is a display consumer, not part of the 100 Hz hot path.
+            // Publish at 5 Hz while retaining every raw/fused record in JSONL.
+            if (timestampNs - lastTelemetryPublishNs >= 200_000_000L) {
+                lastTelemetryPublishNs = timestampNs
+                publishTelemetry()
+            }
         }
     }
 
@@ -165,6 +208,14 @@ class SessionRecordingService : Service() {
             val speed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
             val bearing = if (location.hasBearing()) location.bearing.toDouble() else 0.0
             val accuracy = if (location.hasAccuracy()) location.accuracy.toDouble() else 50.0
+            gnssFixes++
+            lastGnssSpeedMps = speed
+            lastGnssAccuracyM = accuracy
+            lastGnssTimestampNs?.let { previous ->
+                val dt = (location.elapsedRealtimeNanos - previous) / 1_000_000_000.0
+                if (dt in 0.0..10.0) distanceM += speed * dt
+            }
+            lastGnssTimestampNs = location.elapsedRealtimeNanos
 
             // Always logged, regardless of blackout state - withheld fixes are the
             // ground truth the drift is measured against.
@@ -188,6 +239,7 @@ class SessionRecordingService : Service() {
             )
 
             publishStatus(pipeline?.describeFrontEnd() ?: "")
+            publishTelemetry()
         }
 
         @Deprecated("Deprecated in API 29, still required on API 26 targets")
@@ -204,6 +256,7 @@ class SessionRecordingService : Service() {
         thread = HandlerThread("sih26-sensor-ingest")
         thread.start()
         handler = Handler(thread.looper)
+        sessionStore = SessionStore.open(this)
 
         createNotificationChannel()
     }
@@ -218,12 +271,19 @@ class SessionRecordingService : Service() {
                 // control event there too; otherwise a UI toggle can race an IMU
                 // callback halfway through a filter step.
                 handler.post {
+                    val now = android.os.SystemClock.elapsedRealtimeNanos()
+                    if (active && !blackoutActive) blackoutStartedNs = now
+                    if (!active && blackoutActive) {
+                        blackoutStartedNs?.let { blackoutDurationS += (now - it) / 1_000_000_000.0 }
+                        blackoutStartedNs = null
+                    }
                     blackoutActive = active
                     // Fusion timestamps use Android's elapsedRealtime clock. Java's
                     // nanoTime has no API guarantee of sharing that epoch,
                     // especially across suspend, so it must not be mixed into
                     // blackout accounting.
-                    pipeline?.setBlackout(active, android.os.SystemClock.elapsedRealtimeNanos())
+                    pipeline?.setBlackout(active, now)
+                    publishTelemetry()
                 }
             }
         }
@@ -260,11 +320,21 @@ class SessionRecordingService : Service() {
         lastGyro = null
         latestMagnetometer = null
         blackoutActive = false
+        blackoutStartedNs = null
+        blackoutDurationS = 0.0
+        finalBlackoutDriftM = null
+        gnssFixes = 0
+        distanceM = 0.0
+        lastGnssTimestampNs = null
+        lastGnssSpeedMps = null
+        lastGnssAccuracyM = null
+        lastSnapshot = null
+        lastTelemetryPublishNs = 0L
         pipeline = FusionPipeline()
 
-        val outDir = File(getExternalFilesDir(null), "sessions")
-        outDir.mkdirs()
-        val outFile = File(outDir, "session_${System.currentTimeMillis()}.jsonl")
+        val (newSessionId, outFile) = sessionStore.newSessionFile()
+        sessionId = newSessionId
+        sessionStartedUtc = SessionStore.nowUtc()
         logger = SessionLogger(
             outFile,
             device = android.os.Build.MODEL ?: "unknown",
@@ -286,14 +356,32 @@ class SessionRecordingService : Service() {
             locationListener,
             thread.looper
         )
+        publishTelemetry()
     }
 
     private fun stopRecording() {
         sensorManager.unregisterListener(sensorListener)
         locationManager.removeUpdates(locationListener)
         logger?.close()
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        if (blackoutActive) {
+            blackoutStartedNs?.let { blackoutDurationS += (now - it) / 1_000_000_000.0 }
+        }
+        val id = sessionId
+        val rawFile = logger?.outputFile
+        if (id != null && rawFile != null) {
+            sessionStore.save(SessionRecord(
+                id = id, startedUtc = sessionStartedUtc,
+                durationS = (now - sessionStartElapsedNs) / 1_000_000_000.0,
+                imuSamples = pipeline?.imuSamples ?: 0, gnssFixes = gnssFixes,
+                distanceM = distanceM, blackoutDurationS = blackoutDurationS,
+                finalDriftM = finalBlackoutDriftM, rawFile = rawFile
+            ))
+        }
         logger = null
         pipeline = null
+        blackoutActive = false
+        publishTelemetry()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -314,6 +402,22 @@ class SessionRecordingService : Service() {
 
     private fun publishSnapshot(snapshot: FusionSnapshot?) {
         Handler(Looper.getMainLooper()).post { snapshotListener?.invoke(snapshot) }
+    }
+
+    private fun publishTelemetry() {
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        val pipeline = pipeline
+        val telemetry = RecordingTelemetry(
+            recording = pipeline != null,
+            phase = pipeline?.phase,
+            waitingForMovement = pipeline?.waitingForMovingFix ?: false,
+            blackout = blackoutActive,
+            elapsedS = if (pipeline == null) 0.0 else (now - sessionStartElapsedNs) / 1_000_000_000.0,
+            distanceM = distanceM, imuSamples = pipeline?.imuSamples ?: 0,
+            gnssFixes = gnssFixes, gnssSpeedMps = lastGnssSpeedMps,
+            gnssAccuracyM = lastGnssAccuracyM, snapshot = lastSnapshot
+        )
+        Handler(Looper.getMainLooper()).post { telemetryListener?.invoke(telemetry) }
     }
 
     private fun createNotificationChannel() {
