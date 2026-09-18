@@ -129,6 +129,82 @@ Implemented against the milestone above:
   drift-neutrality test exist; the canvas's per-source separation was built with
   that extension in mind.
 
+### Field-test reliability increment (2026-09-18, second ownership pass)
+
+The previous pass made the pipeline *observable*. This pass makes it *survive*
+the specific ways a real field test breaks an app that only ever ran against a
+synthetic session and the emulator-adjacent assumptions that come with that.
+Every item below was found by reading the code for what happens on an actual
+phone, in an actual car, not by guessing at missing features:
+
+- **Foreground-service start crash, fixed.** `SessionRecordingService.startRecording()`
+  used to validate (location permission, then accelerometer/gyroscope presence)
+  *before* calling `startForeground()`, and called `stopSelf()` on failure without
+  ever reaching it. Android requires a service started via `startForegroundService()`
+  (which is how `MainActivity` always starts this one) to call `startForeground()`
+  promptly - skipping it is a hard crash
+  (`ForegroundServiceDidNotStartInTimeException`), not a graceful failure. Denying
+  the location permission, or launching the app on a device with no gyroscope, used
+  to take the whole app down instead of showing the intended error message.
+  `startForeground()` now happens unconditionally first, with validation failures
+  tearing it down cleanly via `stopForeground(STOP_FOREGROUND_REMOVE)` afterward.
+- **Silent recording-data loss, fixed.** Two failure modes could previously end a
+  recording without anyone noticing until after the drive:
+  - `SessionLogger`'s writer thread had no exception handling around the actual
+    file write. An `IOException` (disk full, storage unmounted, an SD card pulled
+    mid-drive) silently killed the daemon thread; nothing drained the queue
+    afterward, so every subsequent sample looked like ordinary backpressure via
+    the existing dropped-sample counter, with no way to tell "the writer briefly
+    fell behind" from "nothing has been saved since minute three." The writer now
+    catches the exception, sets an explicit `failed` flag, and keeps draining
+    (without writing) so `close()` still joins cleanly.
+  - `FusionPipeline.onImu` can throw on a genuine numerical edge case (an
+    ill-conditioned covariance, a singular matrix in `LinAlg.kt`'s Cholesky/solve
+    paths) - this is real, reachable code, not a hypothetical: `LinAlg.kt` and
+    `PhysicsSpeed.kt` both have live `throw` sites this pass found by grep. An
+    uncaught exception there ran on the same `HandlerThread` as the sensor
+    callback and would have crashed the whole process, losing the rest of the
+    drive. The call is now wrapped; on failure, fusion is disabled for the
+    remainder of that session (so it does not throw again every cycle at 100 Hz)
+    while raw IMU/GNSS logging - the one asset a field test cannot repeat -
+    continues uncorrected.
+  - Both failure flags (`loggerFailed`, `fusionFailed`) now flow through
+    `RecordingTelemetry` into a Live-tab error banner, a Diagnostics row, and (for
+    completed sessions) the session sidecar and the Sessions-tab detail view -
+    the same "flows end to end into the UI" pattern the previous pass established
+    for `droppedSamples`.
+- **GPS-off looks identical to GPS-searching, fixed.** A phone with GPS turned off
+  in system settings and a phone that simply hasn't gotten its first fix yet both
+  sat at `WAITING FOR GNSS` with zero fixes - a real trap for a demo where someone
+  forgot to enable location services and the app just looks like it's thinking.
+  `RecordingTelemetry` now carries a live `gpsProviderEnabled` check
+  (`LocationManager.isProviderEnabled`, checked fresh on every publish, not just at
+  start, since it does not require a location fix to answer), and the Live tab
+  shows a distinct "GPS IS OFF" phase and banner instead of the ambiguous waiting
+  state.
+- **Permission-denied dead end, fixed.** Denying location permission used to leave
+  the main screen looking unchanged; tapping "Start recording" did nothing
+  visible (and, per the crash above, could take the app down). `MainActivity` now
+  tracks permission state reactively (re-checked in `onResume` too, so granting it
+  from system Settings and returning to the app is picked up, not just the in-app
+  request dialog), and the Live tab replaces the recording controls with a
+  `PermissionGate` explaining why the permission is needed and offering both
+  "Grant permission" (re-shows the system dialog) and "Open app settings" (for
+  the case where the OS has already decided to stop showing that dialog).
+- **No preflight against running out of storage mid-drive.** JSONL logging is
+  continuous for the whole session; a multi-hour unattended drive at 100 Hz is a
+  real amount of data. Starting a recording now checks free space on the session
+  storage directory first and refuses (with an explanation, not a silent failure)
+  below a generous 50 MB floor, rather than finding out the same way the logger
+  failure above would have surfaced it - after the fact.
+- Not done in this pass, flagged as the next reliability gap worth closing:
+  battery-optimization/autostart exemptions on aggressive OEM skins (MIUI and
+  similar can still throttle or kill a foreground service's background work
+  despite the persistent notification and wake lock); this cannot be fully solved
+  programmatically and the honest fix is a one-line addition to the field-test
+  runbook telling the operator to disable battery optimization for this app
+  before an unattended drive, not a code change.
+
 ---
 
 ## 0. System Summary (read this first)

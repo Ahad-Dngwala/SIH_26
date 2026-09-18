@@ -29,7 +29,15 @@ A Gradle project now exists: `settings.gradle.kts`, root `build.gradle.kts`,
 7. A partial wake lock is held for the duration of a recording
    (`SessionRecordingService`) so screen-off Doze throttling cannot silently reduce
    the sampling rate below what was measured against.
-8. **Not yet driven.** No real recording exists; physical-device logging is the
+8. Reliability hardening against real field-test failure modes: the
+   foreground-service start sequence no longer crashes on a validation failure
+   (denied permission, missing sensor), a storage write failure or a fusion-math
+   exception degrades instead of silently losing the recording, GPS-off is
+   distinguished from GPS-searching, permission denial has an in-app recovery
+   path, and a low-storage preflight refuses to start a recording that is likely
+   to run out mid-drive. See `Master_Implementation_Plan.md`'s "Field-test
+   reliability increment".
+9. **Not yet driven.** No real recording exists; physical-device logging is the
    next acceptance gate.
 
 The Kotlin 2.0 build applies `org.jetbrains.kotlin.plugin.compose`, rather than the
