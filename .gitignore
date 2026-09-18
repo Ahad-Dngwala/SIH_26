@@ -60,3 +60,11 @@ map_matching/osm_extraction/*.graph
 .DS_Store
 *.swp
 .vscode/
+
+# Map Data and Caches
+*.graphml
+cache/
+
+# Model Weights
+models/**/weights/*.pth
+models/**/*.pth

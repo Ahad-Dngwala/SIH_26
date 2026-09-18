@@ -28,7 +28,7 @@ class ChannelAModule(pl.LightningModule):
             kernel_size=mcfg["kernel_size"],
             dropout=mcfg["dropout"],
         )
-        self.loss_fn = nn.HuberLoss(delta=cfg["loss"]["delta"])
+        self.loss_fn = nn.HuberLoss(delta=cfg["loss"]["delta"], reduction="none")
 
     def forward(self, x):
         return self.model(x)
@@ -36,13 +36,19 @@ class ChannelAModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         loss = self.loss_fn(self.model(x), y)
+        w = torch.ones_like(y)
+        w[y < 5] = 2.76
+        w[(y >= 5) & (y < 15)] = 1.00
+        w[(y >= 15) & (y < 30)] = 1.04
+        w[y >= 30] = 17.5
+        loss = (loss * w).mean()
         self.log("train_loss", loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         pred = self.model(x)
-        loss = self.loss_fn(pred, y)
+        loss = self.loss_fn(pred, y).mean()
         rmse = torch.sqrt(torch.mean((pred - y) ** 2))  # the real Section 4.2 target metric
         self.log("val_loss", loss)
         self.log("val_rmse_mps", rmse)
